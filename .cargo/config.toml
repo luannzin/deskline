@@ -1,0 +1,10 @@
+# One self-contained .exe: no C/C++ runtime DLLs to ship next to it.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[env]
+# OpenH264 is C++: link libstdc++ into the exe when cross-building with mingw.
+CXXSTDLIB_x86_64_pc_windows_gnu = "static=stdc++"
