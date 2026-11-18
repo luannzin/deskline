@@ -31,6 +31,7 @@ use crate::settings::Store;
 
 /// `deskline`                 the window (`--home DIR`: another identity, for testing on one machine;
 ///                            `--background`: start in the tray; `--settings`: open on Settings)
+/// `deskline CODE`            connect to CODE (`--with-password`: read its password from stdin)
 /// `deskline --version`       print the version (the updater checks downloads with it)
 /// Windows only:
 /// `deskline --install`       install for all users with the service (asks for admin)
@@ -83,7 +84,19 @@ fn main() -> anyhow::Result<()> {
     }
     update::cleanup();
     let home = home(&args)?;
-    window(home, flag("--background"), flag("--settings"))
+    // `deskline CODE` or `--connect CODE` opens that screen right away; `--with-password` reads
+    // the password from stdin (`echo pw | deskline CODE --with-password`, like AnyDesk), so it
+    // never shows up in a process list.
+    let code = args.iter().position(|a| a == "--connect").and_then(|i| args.get(i + 1)).or_else(|| args.iter().find(|a| net::parse_code(a).is_some()));
+    let connect = code.map(|c| {
+        let mut pw = String::new();
+        if flag("--with-password") {
+            let _ = std::io::stdin().read_line(&mut pw);
+        }
+        let pw = pw.trim_end_matches(['\r', '\n']).to_string();
+        (c.clone(), Some(pw).filter(|p| !p.is_empty()))
+    });
+    window(home, flag("--background"), flag("--settings"), connect)
 }
 
 /// Where the identity and settings live.
@@ -102,7 +115,7 @@ fn home(args: &[String]) -> anyhow::Result<PathBuf> {
     Ok(base.ok_or_else(|| anyhow::anyhow!("no home folder"))?.join("deskline"))
 }
 
-fn window(home: PathBuf, background: bool, settings: bool) -> anyhow::Result<()> {
+fn window(home: PathBuf, background: bool, settings: bool, connect: Option<(String, Option<String>)>) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     let store = Store::open(&home);
     let ep = rt.block_on(net::start(&home, store.get().relay.as_deref()))?;
@@ -118,7 +131,7 @@ fn window(home: PathBuf, background: bool, settings: bool) -> anyhow::Result<()>
             .with_visible(!background),
         ..Default::default()
     };
-    let start = ui::Start { ep, home, store, host, events, service, background, settings };
+    let start = ui::Start { ep, home, store, host, events, service, background, settings, connect };
     eframe::run_native("Deskline", options, Box::new(|cc| Ok(Box::new(ui::App::new(cc, start))))).map_err(|e| anyhow::anyhow!("{e}"))
 }
 

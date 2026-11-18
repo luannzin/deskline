@@ -34,6 +34,8 @@ pub struct Start {
     pub service: bool,
     pub background: bool,
     pub settings: bool,
+    /// From the command line: connect to this code, maybe with its password.
+    pub connect: Option<(String, Option<String>)>,
 }
 
 const RED: Color32 = Color32::from_rgb(150, 40, 40);
@@ -155,7 +157,7 @@ struct Form {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, start: Start) -> Self {
         let ctx = cc.egui_ctx.clone();
-        let Start { ep, home, store, host, mut events, service, background, settings } = start;
+        let Start { ep, home, store, host, mut events, service, background, settings, connect } = start;
         // Host events wake the window, even while it's hidden in the tray.
         let (host_tx, host_events) = mpsc::unbounded_channel();
         let wake = ctx.clone();
@@ -177,7 +179,7 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
         }
-        Self {
+        let mut app = Self {
             name: net::whoami(),
             code: net::code(ep.id()),
             ep,
@@ -207,7 +209,12 @@ impl App {
             updater: (!service).then(|| Updater::start(home.join("update"))),
             #[cfg(windows)]
             keys: keyhook::start(ctx),
+        };
+        if let Some((code, password)) = connect {
+            app.partner = code.clone();
+            app.connect(&code, password, false);
         }
+        app
     }
 
     /// Bring the window up: someone is asking for something.
@@ -524,7 +531,7 @@ impl App {
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("✕").on_hover_text("Forget").clicked() {
+                        if ui.small_button("×").on_hover_text("Forget").clicked() {
                             let id = c.id.clone();
                             let _ = self.store.update(|s| s.contacts.retain(|x| x.id != id));
                         }
@@ -1131,7 +1138,7 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
         return;
     };
     ui.horizontal(|ui| {
-        if ui.add_enabled(!listing.path.is_empty(), egui::Button::new("⬆").small()).on_hover_text("Up").clicked() {
+        if ui.add_enabled(!listing.path.is_empty(), egui::Button::new("Up").small()).clicked() {
             v.session.cmd(Cmd::List(listing.parent.clone().unwrap_or_default()));
         }
         ui.label(RichText::new(if listing.path.is_empty() { "Their computer" } else { &listing.path }).strong());
@@ -1141,7 +1148,7 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
             ui.horizontal(|ui| {
                 let path = listing.path_of(e);
                 if e.dir {
-                    if ui.link(format!("📁 {}", e.name)).clicked() {
+                    if ui.link(format!("{}/", e.name)).clicked() {
                         v.session.cmd(Cmd::List(path.clone()));
                     }
                 } else {
