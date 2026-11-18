@@ -2,8 +2,6 @@
 //! downloads it; the user installs it from the window and Deskline restarts as the new version.
 //! The installed Windows copy is updated silently by its service instead (`run_in_service`).
 //! Trust is HTTPS to this repo's releases, the same as downloading the file by hand.
-// until main.rs and ui.rs use all of it
-#![allow(dead_code)]
 
 use anyhow::{Context, bail};
 use std::path::{Path, PathBuf};

@@ -4,7 +4,6 @@
 //! service. The service (LocalSystem, session 0) keeps `deskline --server` running as SYSTEM in
 //! the active console session, so the sign-in screen, the lock screen and UAC prompts can be
 //! seen and controlled, and relays Ctrl+Alt+Del to `SendSAS`.
-#![allow(dead_code)]
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Write};
@@ -323,7 +322,27 @@ pub fn data_dir() -> anyhow::Result<PathBuf> {
             _ => {}
         }
     }
+    // The folder holds the computer's identity. One a standard user made before Deskline was
+    // installed would be theirs to read (and to plant an identity in): refuse it.
+    anyhow::ensure!(
+        owned_by_system_or_admins(&dir),
+        "{} wasn't created by Deskline. Delete it and install again.",
+        dir.display()
+    );
     Ok(dir)
+}
+
+fn owned_by_system_or_admins(path: &Path) -> bool {
+    use windows::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    let mut owner = PSID::default();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    let err = unsafe { GetNamedSecurityInfoW(&HSTRING::from(path), SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION, Some(&mut owner), None, None, None, &mut sd) };
+    if err != ERROR_SUCCESS {
+        return false;
+    }
+    let ok = unsafe { IsWellKnownSid(owner, WinLocalSystemSid).as_bool() || IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool() };
+    unsafe { LocalFree(Some(HLOCAL(sd.0))) };
+    ok
 }
 
 // ---------------------------------------------------------------- install helpers

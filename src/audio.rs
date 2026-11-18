@@ -11,7 +11,6 @@
 //! Opus is `unsafe_libopus`: libopus 1.3.1 machine-translated to Rust and checked against the
 //! reference test vectors. No C compiler or CMake, so MSVC, Linux, macOS and the mingw cross
 //! build all just work. It's ~20% slower than C, which 64 kbit/s stereo never notices.
-#![allow(dead_code)]
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 

@@ -10,7 +10,6 @@
 //! Each side treats what the other sends as hostile: names are cleaned down to one plain file
 //! name, sizes must match what was announced, nothing lands outside the chosen folder, and a
 //! transfer that fails or is cancelled leaves nothing behind.
-#![allow(dead_code)]
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};

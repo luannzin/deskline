@@ -56,9 +56,28 @@ fn main() -> anyhow::Result<()> {
         if flag("--restart-service") {
             return service::restart_service();
         }
-        for (f, run) in [("--install", service::install as fn() -> anyhow::Result<()>), ("--uninstall", service::uninstall)] {
+        let steps: [(&str, fn() -> anyhow::Result<()>, &str); 2] = [
+            ("--install", service::install, "Deskline is installed. It starts with Windows and works at the sign-in screen."),
+            ("--uninstall", service::uninstall, "Deskline was removed from this computer."),
+        ];
+        for (f, run, done) in steps {
             if flag(f) {
-                return if service::is_elevated() { run() } else { service::elevate(&[f]) };
+                if !service::is_elevated() {
+                    // The elevated copy reports how it went.
+                    let _ = service::elevate(&[f]);
+                    return Ok(());
+                }
+                // No console in release builds: say it in a box.
+                match run() {
+                    Ok(()) if !flag("--quiet") => message(done),
+                    Ok(()) => {}
+                    Err(e) => {
+                        message(&format!("{e:#}"));
+                        // The window that asked waits on this exit code.
+                        std::process::exit(1);
+                    }
+                }
+                return Ok(());
             }
         }
     }
@@ -124,6 +143,13 @@ async fn link_host(
     let (_, present) = watch::channel(true);
     host::start(ep.clone(), home.to_path_buf(), store.clone(), net::whoami(), UiLink { events, cmds, present, summon: None });
     (tx, rx, false)
+}
+
+#[cfg(windows)]
+fn message(text: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_OK, MessageBoxW};
+    use windows::core::{HSTRING, w};
+    unsafe { MessageBoxW(None, &HSTRING::from(text), w!("Deskline"), MB_OK) };
 }
 
 /// `--server`: the host side of the installed service, as SYSTEM in the signed-in session. Its

@@ -470,7 +470,8 @@ impl Host {
                     Some(Ask::Sound(on)) => {
                         sound = None;
                         if on {
-                            match audio::Capture::start() {
+                            // Opening the device blocks (up to 3 s on Linux).
+                            match tokio::task::block_in_place(audio::Capture::start) {
                                 Ok(s) => sound = Some(s),
                                 Err(e) => send_msg(send, &Tell::Note(format!("No sound from this computer: {e}"))).await?,
                             }

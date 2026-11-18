@@ -1139,7 +1139,7 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
     ScrollArea::vertical().show(ui, |ui| {
         for e in &listing.entries {
             ui.horizontal(|ui| {
-                let path = if listing.path.is_empty() { e.name.clone() } else { join(&listing.path, &e.name) };
+                let path = listing.path_of(e);
                 if e.dir {
                     if ui.link(format!("📁 {}", e.name)).clicked() {
                         v.session.cmd(Cmd::List(path.clone()));
@@ -1155,12 +1155,6 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
             });
         }
     });
-}
-
-/// A path on their computer: their separator, whatever ours is.
-fn join(dir: &str, name: &str) -> String {
-    let sep = if dir.contains('\\') { '\\' } else { '/' };
-    if dir.ends_with(sep) { format!("{dir}{name}") } else { format!("{dir}{sep}{name}") }
 }
 
 fn size(n: u64) -> String {

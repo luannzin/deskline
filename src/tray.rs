@@ -1,8 +1,6 @@
 //! System tray icon: Deskline keeps accepting sessions with its window closed. A badge shows
 //! while someone waits for an answer.
 //! Linux uses the pure-Rust StatusNotifierItem backend (no GTK).
-// until ui.rs uses it
-#![allow(dead_code)]
 
 use eframe::egui::Context;
 use std::sync::mpsc::{Receiver, channel};

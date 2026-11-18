@@ -1,8 +1,6 @@
 //! Start Deskline in the background (to the tray) when the user signs in: the Run key on Windows,
 //! an XDG autostart entry on Linux, a LaunchAgent on macOS. Each points at this exe, so a copy
 //! that was moved shows as off until it's turned on again.
-// until ui.rs uses it
-#![allow(dead_code)]
 
 use anyhow::Context;
 use std::path::Path;

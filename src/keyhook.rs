@@ -1,8 +1,6 @@
 //! Windows viewer: a low-level keyboard hook. While grabbing and Deskline's window has focus,
 //! every key (Win, Alt+Tab, Print Screen, numpad, media keys…) goes to the remote screen instead
 //! of this computer. Also the Linux evdev <-> Windows key table the Windows host injects with.
-// Until the viewer UI calls start/grab.
-#![allow(dead_code)]
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
