@@ -915,12 +915,17 @@ dependencies = [
  "eframe",
  "iroh",
  "iroh-mdns-address-lookup",
+ "libc",
  "openh264",
  "pipewire",
  "postcard",
  "serde",
  "tokio",
+ "wayland-client",
+ "wayland-protocols-misc",
+ "wayland-protocols-wlr",
  "windows",
+ "x11rb",
 ]
 
 [[package]]

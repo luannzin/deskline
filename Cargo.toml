@@ -18,11 +18,17 @@ postcard = { version = "1", features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 
-# Linux: the xdg RemoteDesktop portal (Wayland and X11 desktops that ship it) and PipeWire for
-# the frames. Building needs libpipewire-0.3-dev and libclang-dev.
+# Linux: the xdg RemoteDesktop/ScreenCast portals with PipeWire for the frames (GNOME, KDE,
+# wlroots), Wayland virtual input on wlroots, and X11 directly elsewhere. Building needs
+# libpipewire-0.3-dev and libclang-dev.
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.14", features = ["remote_desktop", "screencast"] }
+libc = "0.2"
 pipewire = "0.10"
+wayland-client = "0.31"
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+x11rb = { version = "0.13", features = ["randr", "shm", "xfixes", "xtest"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
