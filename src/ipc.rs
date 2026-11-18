@@ -4,12 +4,10 @@
 //! takes changes to who gets in without a click only from an elevated window.
 use std::os::windows::io::AsRawHandle;
 
-
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, ServerOptions};
 use tokio::sync::{mpsc, watch};
-use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
-use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
-use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId};
 use windows::core::w;
 
@@ -83,16 +81,14 @@ pub fn serve(mut events: mpsc::UnboundedReceiver<HostEvent>, cmds: mpsc::Unbound
 
 fn create(name: &str, first: bool) -> anyhow::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
     // SYSTEM and administrators: full access; interactive users: read and write.
-    let mut sd = PSECURITY_DESCRIPTOR::default();
-    unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(w!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"), 1, &mut sd, None)? };
-    let mut sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd.0, bInheritHandle: false.into() };
+    let sd = service::descriptor(w!("D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)"))?;
+    let mut sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: (*sd).0, bInheritHandle: false.into() };
     let server = unsafe {
         ServerOptions::new()
             .first_pipe_instance(first)
             .reject_remote_clients(true)
             .create_with_security_attributes_raw(name, (&raw mut sa).cast())
     };
-    unsafe { LocalFree(Some(HLOCAL(sd.0))) };
     Ok(server?)
 }
 

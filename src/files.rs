@@ -17,8 +17,9 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 
+use crate::proto::{recv_msg, send_msg};
 #[cfg(windows)]
 use crate::service::as_user;
 
@@ -86,7 +87,6 @@ struct Item {
 const CHUNK: usize = 64 << 10;
 /// In place of a frame length: the sender couldn't read this file after all.
 const SKIPPED: u32 = u32::MAX;
-const MAX_MSG: usize = 16 << 20;
 const LOST: &str = "Lost the connection to their computer";
 const ODD: &str = "Their computer sent something Deskline doesn't understand.";
 
@@ -128,7 +128,8 @@ pub async fn download(conn: &Connection, remote: &str, dest_dir: &Path, progress
 
 async fn open(conn: &Connection, req: &Req) -> anyhow::Result<(SendStream, RecvStream)> {
     let (mut send, recv) = conn.open_bi().await.context(LOST)?;
-    send_msg(&mut send, req).await.context(LOST)?;
+    // Not LOST: a request too big to send says so.
+    send_msg(&mut send, req).await?;
     Ok((send, recv))
 }
 
@@ -568,27 +569,15 @@ fn roots() -> Vec<String> {
 
 /// A shell folder (Desktop, Documents…) of the user this thread acts as.
 #[cfg(windows)]
-fn known_folder(id: &windows::core::GUID) -> anyhow::Result<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+fn known_folder(id: &windows::core::GUID) -> windows::core::Result<PathBuf> {
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Security::{TOKEN_IMPERSONATE, TOKEN_QUERY};
-    use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::System::Threading::{GetCurrentThread, OpenThreadToken};
-    use windows::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
-    unsafe {
-        // Without a token the shell answers for the process's user, SYSTEM under the service:
-        // pass the impersonation token when there is one.
-        let mut h = HANDLE::default();
-        let token = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_IMPERSONATE, true, &mut h).ok().map(|()| h);
-        let path = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, token);
-        if let Some(t) = token {
-            let _ = CloseHandle(t);
-        }
-        let path = path?;
-        let dir = PathBuf::from(std::ffi::OsString::from_wide(path.as_wide()));
-        CoTaskMemFree(Some(path.0 as *const _));
-        Ok(dir)
-    }
+    // Without a token the shell answers for the process's user, SYSTEM under the service:
+    // pass the impersonation token when there is one.
+    let mut h = windows::core::Owned::<HANDLE>::default();
+    let token = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY | TOKEN_IMPERSONATE, true, &mut *h) }.ok().map(|()| *h);
+    crate::service::known_folder(id, token)
 }
 
 /// A folder in the home folder. On Linux, where ~/.config/user-dirs.dirs says: desktops move
@@ -603,26 +592,6 @@ fn user_dir(key: &str, fallback: &str) -> Option<PathBuf> {
         Some(v) => v.strip_prefix("$HOME").map_or(v, |rest| rest.trim_start_matches('/')),
         None => fallback,
     }))
-}
-
-// ---------------------------------------------------------------- wire
-
-async fn send_msg<T: Serialize>(w: &mut SendStream, m: &T) -> anyhow::Result<()> {
-    let bytes = postcard::to_stdvec(m)?;
-    anyhow::ensure!(bytes.len() <= MAX_MSG, "That's too many files at once.");
-    w.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
-    w.write_all(&bytes).await?;
-    Ok(())
-}
-
-async fn recv_msg<T: DeserializeOwned>(r: &mut RecvStream) -> anyhow::Result<T> {
-    let mut len = [0u8; 4];
-    r.read_exact(&mut len).await?;
-    let n = u32::from_le_bytes(len) as usize;
-    anyhow::ensure!(n <= MAX_MSG, "message too large: {n} bytes");
-    let mut buf = vec![0; n];
-    r.read_exact(&mut buf).await?;
-    Ok(postcard::from_bytes(&buf)?)
 }
 
 #[cfg(test)]

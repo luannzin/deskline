@@ -51,7 +51,6 @@ impl Screen {
     }
 
     pub async fn select(&mut self, index: usize) -> anyhow::Result<()> {
-        anyhow::ensure!(index < SIZES.len(), "no monitor {index}");
         self.current.store(index, Ordering::Relaxed);
         Ok(())
     }

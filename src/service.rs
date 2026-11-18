@@ -62,7 +62,12 @@ pub fn install() -> anyhow::Result<()> {
             stop(**svc)?;
         }
         fs::create_dir_all(&dir)?;
-        copy_exe(&me, &exe).with_context(|| format!("Couldn't copy Deskline to {}", dir.display()))?;
+        if exe.exists() {
+            // A Deskline window may still run the old exe.
+            crate::update::swap(&exe, &me)?;
+        } else {
+            fs::copy(&me, &exe).with_context(|| format!("Couldn't copy Deskline to {}", dir.display()))?;
+        }
     }
 
     let bin = HSTRING::from(cmdline(&exe, &["--service"]));
@@ -312,15 +317,13 @@ pub fn session_id() -> u32 {
 /// An existing folder is left as it is.
 pub fn data_dir() -> anyhow::Result<PathBuf> {
     let dir = known_folder(&FOLDERID_ProgramData, None)?.join("Deskline");
-    if !dir.is_dir() {
-        let sd = descriptor(DATA_ACL)?;
-        let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: (*sd).0, bInheritHandle: false.into() };
-        match unsafe { CreateDirectoryW(&HSTRING::from(dir.as_path()), Some(&sa)) } {
-            Err(e) if e.code() != ERROR_ALREADY_EXISTS.to_hresult() => {
-                return Err(e).with_context(|| format!("Couldn't create {}", dir.display()));
-            }
-            _ => {}
+    let sd = descriptor(DATA_ACL)?;
+    let sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: (*sd).0, bInheritHandle: false.into() };
+    match unsafe { CreateDirectoryW(&HSTRING::from(dir.as_path()), Some(&sa)) } {
+        Err(e) if e.code() != ERROR_ALREADY_EXISTS.to_hresult() => {
+            return Err(e).with_context(|| format!("Couldn't create {}", dir.display()));
         }
+        _ => {}
     }
     // The folder holds the computer's identity. One a standard user made before Deskline was
     // installed would be theirs to read (and to plant an identity in): refuse it.
@@ -374,19 +377,6 @@ fn stop(svc: SC_HANDLE) -> anyhow::Result<()> {
         }
         std::thread::sleep(Duration::from_millis(250));
     }
-}
-
-/// A Deskline window may still run the old exe: it can't be overwritten but can be moved aside.
-fn copy_exe(me: &Path, exe: &Path) -> std::io::Result<()> {
-    let old = exe.with_extension("old");
-    let _ = fs::remove_file(&old);
-    if exe.exists() {
-        fs::rename(exe, &old)?;
-    }
-    fs::copy(me, exe)?;
-    // Still running: the next install or the uninstall removes it.
-    let _ = fs::remove_file(&old);
-    Ok(())
 }
 
 /// The description in services.msc, and a restart 5 s after a crash.
@@ -693,7 +683,8 @@ fn elevated(process: HANDLE) -> bool {
     }
 }
 
-fn known_folder(id: &GUID, token: Option<HANDLE>) -> windows::core::Result<PathBuf> {
+/// A shell folder of the user `token` stands for, or of this process's user.
+pub(crate) fn known_folder(id: &GUID, token: Option<HANDLE>) -> windows::core::Result<PathBuf> {
     unsafe {
         let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, token)?;
         let path = PathBuf::from(OsString::from_wide(p.as_wide()));
@@ -703,7 +694,7 @@ fn known_folder(id: &GUID, token: Option<HANDLE>) -> windows::core::Result<PathB
 }
 
 /// A security descriptor from SDDL, freed on drop.
-fn descriptor(sddl: PCWSTR) -> windows::core::Result<Owned<HLOCAL>> {
+pub(crate) fn descriptor(sddl: PCWSTR) -> windows::core::Result<Owned<HLOCAL>> {
     let mut sd = PSECURITY_DESCRIPTOR::default();
     unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &mut sd, None)?;
@@ -713,12 +704,7 @@ fn descriptor(sddl: PCWSTR) -> windows::core::Result<Owned<HLOCAL>> {
 
 /// `"<exe>" args…`, each argument quoted so Windows splits it back exactly.
 fn cmdline(exe: &Path, args: &[&str]) -> String {
-    let mut s = format!("\"{}\"", exe.display());
-    for a in args {
-        s.push(' ');
-        s.push_str(&quote(a));
-    }
-    s
+    std::iter::once(format!("\"{}\"", exe.display())).chain(args.iter().map(|a| quote(a))).collect::<Vec<_>>().join(" ")
 }
 
 /// One argument as `CommandLineToArgvW` reads it back: quoted when it has spaces or quotes, with

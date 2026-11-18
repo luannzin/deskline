@@ -67,9 +67,8 @@ impl Updater {
     /// Install `ready` off the UI thread (Linux asks for a password); `Installed` or `Failed` follows.
     pub fn install(&mut self) {
         let Some((_, file)) = self.ready.clone() else { return };
-        if std::mem::replace(&mut self.installing, true) {
-            return;
-        }
+        // The window disables its button meanwhile.
+        self.installing = true;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(match install(&file) {
@@ -155,13 +154,13 @@ fn version_of(exe: &Path) -> anyhow::Result<String> {
     use std::io::Read;
     use std::os::windows::process::CommandExt;
     use std::process::Stdio;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    use windows::Win32::System::Threading::CREATE_NO_WINDOW;
     let mut child = Command::new(exe)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
+        .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()?;
     // a build that doesn't know --version would open its window (as SYSTEM, in the service)
     for _ in 0..300 {
@@ -181,17 +180,11 @@ fn args() -> impl Iterator<Item = std::ffi::OsString> {
     std::env::args_os().skip(1).filter(|a| a != "--background")
 }
 
-/// The installed copy in Program Files is its service's to update.
-#[cfg(windows)]
+/// The installed Windows copy in Program Files is its service's to update.
 fn service_updates_us() -> bool {
     let (Some(pf), Ok(exe)) = (std::env::var_os("ProgramFiles"), std::env::current_exe()) else { return false };
     let installed = Path::new(&pf).join("Deskline");
     exe.parent().is_some_and(|d| d.to_string_lossy().eq_ignore_ascii_case(&installed.to_string_lossy()))
-}
-
-#[cfg(not(windows))]
-fn service_updates_us() -> bool {
-    false
 }
 
 /// Only the .deb's copy can replace itself on Linux (apt does it); others hear about new versions.
@@ -208,7 +201,7 @@ fn install(new: &Path) -> anyhow::Result<()> {
 /// Puts `new` where `exe` is. Windows lets a running exe be renamed but not overwritten, so the old
 /// one moves aside to `deskline.old.exe` (`cleanup` deletes it once it has quit).
 #[cfg(windows)]
-fn swap(exe: &Path, new: &Path) -> anyhow::Result<()> {
+pub(crate) fn swap(exe: &Path, new: &Path) -> anyhow::Result<()> {
     let old = exe.with_file_name(OLD);
     let _ = std::fs::remove_file(&old);
     let cant = || format!("Couldn't replace {}: is its folder read-only?", exe.display());
@@ -248,9 +241,6 @@ pub fn run_in_service(dir: PathBuf) {
         }
     });
 }
-
-#[cfg(not(windows))]
-pub fn run_in_service(_dir: PathBuf) {}
 
 /// Start the newly installed version after `Installed`, with our arguments.
 #[cfg(windows)]

@@ -35,13 +35,6 @@ const QUIET_FRAMES: usize = 25;
 /// Quieter than one 16-bit step counts as digital silence.
 const SILENCE: f32 = 1.0 / 32768.0;
 
-// The caller keeps these in spawned tasks, across awaits.
-const _: () = {
-    const fn send<T: Send>() {}
-    send::<Capture>();
-    send::<Player>();
-};
-
 /// Capturing what this computer plays. Dropping it stops.
 pub struct Capture {
     #[cfg(target_os = "linux")]
@@ -135,12 +128,6 @@ fn on_thread<R: Send + 'static>(
     Ok((stop, r))
 }
 
-/// The device is gone for good, not just a glitch.
-fn gone(e: &cpal::Error) -> bool {
-    use cpal::ErrorKind::*;
-    matches!(e.kind(), DeviceNotAvailable | StreamInvalidated | HostUnavailable)
-}
-
 // ---------------------------------------------------------------- capture
 
 #[cfg(not(target_os = "linux"))]
@@ -193,9 +180,11 @@ where
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             packer.push(rate, data.chunks_exact(ch).map(|f| stereo(ch, |i| f[i].to_sample())));
         },
-        // Ending the stream drops the packer, which closes the packet channel.
+        // Ending the stream drops the packer, which closes the packet channel. Only when the
+        // device is gone for good, not for a glitch.
         move |e| {
-            if gone(&e) {
+            use cpal::ErrorKind::*;
+            if matches!(e.kind(), DeviceNotAvailable | StreamInvalidated | HostUnavailable) {
                 let _ = stop.send(());
             }
         },

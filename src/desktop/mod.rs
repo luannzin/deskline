@@ -76,30 +76,24 @@ impl Screen {
 
     /// Share another monitor. Frames keep arriving on the same `frames` channel.
     pub async fn select(&mut self, index: usize) -> anyhow::Result<()> {
+        anyhow::ensure!(index < self.monitors().len(), "There's no screen {} on this computer.", index + 1);
         self.release().await;
         self.imp.select(index).await
     }
 
     pub async fn input(&mut self, i: Input) -> anyhow::Result<()> {
-        match i {
-            Input::Key { code, down } => {
-                let held = Input::Key { code, down: true };
-                // Wayland apps repeat a held key themselves; a second press would double it.
-                if down && cfg!(target_os = "linux") && self.held.contains(&held) {
-                    return Ok(());
-                }
-                self.held.retain(|h| *h != held);
-                if down {
-                    self.held.push(i);
-                }
-            }
-            Input::Button { button, down } => {
-                self.held.retain(|h| *h != Input::Button { button, down: true });
-                if down {
-                    self.held.push(i);
-                }
-            }
-            _ => {}
+        let (held, down) = match i {
+            Input::Key { code, down } => (Input::Key { code, down: true }, down),
+            Input::Button { button, down } => (Input::Button { button, down: true }, down),
+            _ => return self.imp.input(i).await,
+        };
+        // Wayland apps repeat a held key themselves; a second press would double it.
+        if down && cfg!(target_os = "linux") && matches!(i, Input::Key { .. }) && self.held.contains(&held) {
+            return Ok(());
+        }
+        self.held.retain(|h| *h != held);
+        if down {
+            self.held.push(held);
         }
         self.imp.input(i).await
     }

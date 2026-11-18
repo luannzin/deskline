@@ -23,7 +23,7 @@ use crate::desktop::{Frame, Input, Monitor};
 const BUTTONS: [u8; 5] = [1, 3, 2, 8, 9];
 
 /// A monitor in root window coordinates.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy)]
 struct Rect {
     x: i16,
     y: i16,
@@ -84,7 +84,6 @@ impl Screen {
     }
 
     pub fn select(&mut self, index: usize) -> anyhow::Result<()> {
-        anyhow::ensure!(index < self.monitors.len(), "no monitor {index}");
         self.current.store(index, Ordering::Relaxed);
         Ok(())
     }
@@ -154,11 +153,6 @@ fn crtcs(conn: &RustConnection, root: Window) -> anyhow::Result<Vec<(Monitor, Re
         };
         found.push((m, Rect { x: c.x, y: c.y, w: c.width, h: c.height }));
     }
-    if !found.iter().any(|(m, _)| m.primary)
-        && let Some((m, _)) = found.first_mut()
-    {
-        m.primary = true;
-    }
     Ok(found)
 }
 
@@ -179,7 +173,6 @@ fn capture(
         && conn.xfixes_query_version(4, 0)?.reply().is_ok();
     let _ = ready.send(Ok(()));
 
-    let mut last: Option<Arc<Frame>> = None;
     while !stop.load(Ordering::Relaxed) {
         let started = Instant::now();
         let r = rects[current.load(Ordering::Relaxed)];
@@ -191,10 +184,9 @@ fn capture(
             let y = i32::from(c.y) - i32::from(c.yhot) - i32::from(r.y);
             draw_cursor(&mut frame, x, y, c.width.into(), &c.cursor_image);
         }
-        if last.as_ref().is_none_or(|l| l.w != frame.w || l.px != frame.px) {
-            let frame = Arc::new(frame);
-            last = Some(frame.clone());
-            frames.send_replace(Some(frame));
+        // The borrow ends with the condition, before the send.
+        if frames.borrow().as_ref().is_none_or(|l| l.w != frame.w || l.px != frame.px) {
+            frames.send_replace(Some(Arc::new(frame)));
         }
         // Keyboard mapping changes reach every client; drop them so they don't pile up.
         while let Ok(Some(_)) = conn.poll_for_event() {}

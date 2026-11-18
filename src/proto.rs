@@ -75,8 +75,12 @@ pub struct Packet {
     pub data: Vec<u8>,
 }
 
+/// The biggest message either side sends or takes.
+const MAX: usize = 16 << 20;
+
 pub async fn send_msg<T: Serialize, W: AsyncWrite + Unpin>(w: &mut W, m: &T) -> anyhow::Result<()> {
     let bytes = postcard::to_stdvec(m)?;
+    anyhow::ensure!(bytes.len() <= MAX, "That's too much to send at once.");
     w.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
     w.write_all(&bytes).await?;
     Ok(())
@@ -86,7 +90,7 @@ async fn recv_raw<R: AsyncRead + Unpin>(r: &mut R) -> anyhow::Result<Vec<u8>> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await?;
     let n = u32::from_le_bytes(len) as usize;
-    anyhow::ensure!(n <= 16 << 20, "message too large: {n} bytes");
+    anyhow::ensure!(n <= MAX, "message too large: {n} bytes");
     let mut buf = vec![0; n];
     r.read_exact(&mut buf).await?;
     Ok(buf)

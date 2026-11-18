@@ -22,16 +22,9 @@ impl Clipboard {
         let (ready_tx, ready) = channel();
         // Polling: no OS has a portable change notification, and twice a second is plenty.
         std::thread::Builder::new().name("clipboard".into()).spawn(move || {
-            let mut cb = match arboard::Clipboard::new() {
-                Ok(cb) => {
-                    let _ = ready_tx.send(Ok(()));
-                    cb
-                }
-                Err(e) => {
-                    let _ = ready_tx.send(Err(anyhow::anyhow!("no clipboard: {e}")));
-                    return;
-                }
-            };
+            let cb = arboard::Clipboard::new();
+            let _ = ready_tx.send(cb.as_ref().map(|_| ()).map_err(|e| anyhow::anyhow!("no clipboard: {e}")));
+            let Ok(mut cb) = cb else { return };
             let mut last = cb.get_text().ok();
             loop {
                 match set.recv_timeout(Duration::from_millis(500)) {

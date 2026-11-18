@@ -78,7 +78,6 @@ impl Screen {
     }
 
     pub async fn select(&mut self, index: usize) -> anyhow::Result<()> {
-        anyhow::ensure!(index < self.monitors.len(), "There's no screen {} on this computer.", index + 1);
         self.shared.want.store(index, Ordering::SeqCst);
         Ok(())
     }
@@ -212,22 +211,20 @@ fn send_input(i: Input, shared: RECT) {
             )
         }
         Input::Button { button, down } => {
-            let (flags, data) = match (button, down) {
-                (0, true) => (MOUSEEVENTF_LEFTDOWN, 0),
-                (0, false) => (MOUSEEVENTF_LEFTUP, 0),
-                (1, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
-                (1, false) => (MOUSEEVENTF_RIGHTUP, 0),
-                (2, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
-                (2, false) => (MOUSEEVENTF_MIDDLEUP, 0),
-                (3, true) => (MOUSEEVENTF_XDOWN, XBUTTON1),
-                (3, false) => (MOUSEEVENTF_XUP, XBUTTON1),
-                (4, true) => (MOUSEEVENTF_XDOWN, XBUTTON2),
-                (4, false) => (MOUSEEVENTF_XUP, XBUTTON2),
-                _ => return,
-            };
-            mouse(flags, 0, 0, data as i32)
+            // (press, lift, mouseData) for left, right, middle, back, forward.
+            let buttons = [
+                (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, 0),
+                (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, 0),
+                (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, 0),
+                (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON1),
+                (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, XBUTTON2),
+            ];
+            let Some(&(press, lift, data)) = buttons.get(button as usize) else { return };
+            mouse(if down { press } else { lift }, 0, 0, data as i32)
         }
         Input::Scroll { x, y } => {
+            // At most 100 notches a go, like X11: a bad value can't overflow 120 per notch.
+            let (x, y) = (x.clamp(-100, 100), y.clamp(-100, 100));
             if y != 0 {
                 mouse(MOUSEEVENTF_WHEEL, 0, 0, y * 120)
             }

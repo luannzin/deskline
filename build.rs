@@ -8,17 +8,8 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    println!("cargo:rerun-if-changed=assets/icon.ico");
     let mut res = winresource::WindowsResource::new();
-    res.set("ProductName", "Deskline").set("FileDescription", "Deskline");
-    let icon = "assets/icon.ico";
-    if std::path::Path::new(icon).exists() {
-        res.set_icon(icon);
-        println!("cargo:rerun-if-changed={icon}");
-    } else {
-        println!("cargo:warning=no {icon} yet: deskline.exe gets the default icon");
-        println!("cargo:rerun-if-changed=assets");
-    }
-    if let Err(e) = res.compile() {
-        panic!("couldn't put the icon and version info into deskline.exe: {e}");
-    }
+    res.set("ProductName", "Deskline").set("FileDescription", "Deskline").set_icon("assets/icon.ico");
+    res.compile().unwrap_or_else(|e| panic!("couldn't put the icon and version info into deskline.exe: {e}"));
 }

@@ -330,8 +330,7 @@ fn capture(
         move |cmd| match cmd {
             Cmd::Stop => mainloop.quit(),
             Cmd::Switch(node) => {
-                let old = watching.borrow_mut().take();
-                drop(old);
+                drop(watching.take());
                 match connect(&core, &mainloop, node, frames.clone()) {
                     Ok(w) => *watching.borrow_mut() = Some(w),
                     Err(_) => mainloop.quit(),
