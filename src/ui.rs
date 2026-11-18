@@ -17,7 +17,7 @@ use crate::desktop::{self, ALT, CTRL, Input, Monitor, SHIFT};
 use crate::files::Listing;
 use crate::host::{HostCmd, HostEvent};
 use crate::i18n::{t, tf};
-use crate::look::{self, GREEN, GROUND, HAIRLINE, INK, MUTED, RED, SOFT, muted, primary, primary_enabled, quiet, soft, strong};
+use crate::look::{self, GREEN, GROUND, HAIRLINE, INK, RED, SOFT, muted, primary, primary_enabled, quiet, soft, strong};
 use crate::proto::Ask;
 use crate::settings::{self, Peer, Store};
 use crate::tray::{Tray, TrayMsg};
@@ -64,6 +64,8 @@ pub struct App {
     password: String,
     remember: bool,
     note: String,
+    /// When "Copy code" was last clicked: the button says "Copied" for 2 s.
+    copied_at: Option<f64>,
     requests: Vec<Request>,
     shares: Vec<Share>,
     views: Vec<Viewing>,
@@ -204,6 +206,7 @@ impl App {
             password: String::new(),
             remember: false,
             note: String::new(),
+            copied_at: None,
             requests: Vec::new(),
             shares: Vec::new(),
             views: Vec::new(),
@@ -261,6 +264,8 @@ impl App {
             HostEvent::Sharing { id, who, control } => {
                 self.shares.retain(|s| s.id != id);
                 self.shares.push(Share { id, who, control, asking: false, chat: Chat::default() });
+                // Someone got in (perhaps with the password, perhaps trusted): the red bar shows.
+                self.show(ctx);
             }
             HostEvent::ControlRequest { id } => {
                 if let Some(s) = self.shares.iter_mut().find(|s| s.id == id) {
@@ -404,10 +409,11 @@ impl App {
     /// The current tab is ink with a hairline under it; the others are soft.
     fn tabs(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
+        let before = self.tab;
         let frame = egui::Frame::new().fill(GROUND).inner_margin(egui::Margin::symmetric(16, 10));
         egui::Panel::top("tabs").frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
-                if look::mark(ui, &self.mark, 24.0).interact(Sense::click()).clicked() {
+                if look::mark(ui, &self.mark, 32.0).interact(Sense::click()).clicked() {
                     self.tab = Tab::Home;
                 }
                 ui.add_space(4.0);
@@ -419,7 +425,7 @@ impl App {
                         label.push_str(&format!("  {}", v.chat.unread));
                     }
                     tab(ui, &mut self.tab, Tab::View(v.session.id), label);
-                    if quiet(ui, "×").on_hover_text(t("Disconnect")).clicked() {
+                    if look::close(ui).on_hover_text(t("Disconnect")).clicked() {
                         close = Some(v.session.id);
                     }
                 }
@@ -430,6 +436,10 @@ impl App {
         });
         if let Some(id) = close {
             self.hang_up(ui.ctx(), id);
+        }
+        // A note belongs to the page it was written on.
+        if self.tab != before {
+            self.note.clear();
         }
     }
 
@@ -455,9 +465,14 @@ impl App {
             look::code(ui, &self.code);
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if primary(ui, t("Copy code")).clicked() {
+                let now = ui.input(|i| i.time);
+                let copied = self.copied_at.is_some_and(|at| now - at < 2.0);
+                if copied {
+                    ui.ctx().request_repaint_after(Duration::from_millis(250));
+                }
+                if primary(ui, if copied { t("Copied") } else { t("Copy code") }).clicked() {
                     ui.ctx().copy_text(self.code.replace(' ', ""));
-                    self.note = t("Copied. Paste it in a message to the person helping you.");
+                    self.copied_at = Some(now);
                 }
                 ui.add_space(8.0);
                 let state = if self.password_on { t("Unattended access is on") } else { t("Unattended access is off") };
@@ -466,21 +481,18 @@ impl App {
                     self.tab = Tab::Settings;
                 }
             });
-            #[cfg(windows)]
-            if !self.service && quiet(ui, t("Install for the sign-in screen")).on_hover_text(t("Starts with Windows and works at the sign-in screen, lock screen and admin prompts")).clicked() {
-                self.install();
-            }
 
             ui.add_space(40.0);
             ui.label(strong(t("Connect to a computer")));
             ui.add_space(4.0);
             let mut go = false;
-            ui.horizontal(|ui| {
-                let field = TextEdit::singleline(&mut self.partner).hint_text(t("Paste their code")).desired_width(ui.available_width() - 104.0);
-                let field = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
-                go = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            // Button first from the right, so the field takes whatever width the words leave.
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let ready = !self.partner.trim().is_empty();
-                go = (primary_enabled(ui, ready, t("Connect")).clicked() || go) && ready;
+                let clicked = primary_enabled(ui, ready, t("Connect")).clicked();
+                let field = TextEdit::singleline(&mut self.partner).hint_text(t("Paste their code")).desired_width(ui.available_width());
+                let field = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+                go = (clicked || (field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && ready;
             });
             if self.need_password {
                 let pw = TextEdit::singleline(&mut self.password).password(true).hint_text(t("Their unattended-access password"));
@@ -549,12 +561,12 @@ impl App {
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
                                 ui.label(strong(c.label()));
-                                ui.label(RichText::new(format!("{}  ·  {}", &c.id[..8], settings::when(c.last))).monospace().size(12.0).color(MUTED));
+                                ui.label(muted(format!("{}  ·  {}", &c.id[..8], settings::when(c.last))));
                             });
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if quiet(ui, "×").on_hover_text(t("Forget")).clicked() {
+                        if quiet(ui, t("Forget")).clicked() {
                             let id = c.id.clone();
                             let _ = self.store.update(|s| s.contacts.retain(|x| x.id != id));
                         }
@@ -603,6 +615,10 @@ impl App {
             look::hairline(ui);
             ui.add_space(16.0);
             self.system(ui);
+            if !self.note.is_empty() {
+                ui.add_space(8.0);
+                ui.label(soft(&self.note));
+            }
             ui.add_space(32.0);
             ui.label(muted(format!("Deskline {}", env!("CARGO_PKG_VERSION"))));
             ui.add_space(24.0);
@@ -658,7 +674,7 @@ impl App {
                 look::row(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&p.name).color(INK));
-                        ui.label(RichText::new(&p.id[..8]).monospace().size(12.0).color(MUTED));
+                        ui.label(muted(&p.id[..8]).monospace());
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if ui.add_enabled(!locked, egui::Button::new(soft(t("Remove"))).frame_when_inactive(false)).clicked() {
                                 let _ = self.host.send(HostCmd::Untrust(p.id.clone()));
@@ -724,10 +740,11 @@ impl App {
         ui.label(soft(t(
             "Leave empty for the public relays. Your own: run iroh-relay and paste its URL. Restart Deskline after changing.",
         )));
-        ui.horizontal(|ui| {
-            let field = TextEdit::singleline(&mut self.form.relay).hint_text("https://relay.example.com").desired_width(ui.available_width() - 80.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let save = ui.button(t("Save")).clicked();
+            let field = TextEdit::singleline(&mut self.form.relay).hint_text("https://relay.example.com").desired_width(ui.available_width());
             ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
-            if ui.button(t("Save")).clicked() {
+            if save {
                 let relay = Some(self.form.relay.trim().to_string()).filter(|r| !r.is_empty());
                 let _ = self.store.update(|s| s.relay = relay);
                 self.note = t("Saved. Restart Deskline to use it.");
@@ -750,9 +767,8 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.set_max_width(360.0);
             ui.add_space((ui.available_height() * 0.22).max(40.0));
-            ui.label(RichText::new(&net::code(v.peer)[..19]).monospace().color(MUTED));
-            ui.add_space(4.0);
             ui.label(strong(&v.status));
+            ui.label(muted(&net::code(v.peer)[..19]).monospace());
             ui.add_space(16.0);
             look::waiting(ui, 280.0);
             ui.add_space(24.0);
@@ -866,8 +882,9 @@ impl App {
         }
     }
 
-    /// While someone is in this computer: a red bar per person, always on top, with the way to
-    /// stop them one click away.
+    /// While someone is in this computer: a red bar per person at the top of the window, with
+    /// the way to stop them one click away; and while the window isn't in front, the same bar in
+    /// a small window above every other one, so it's never behind what the helper opened.
     fn banners(&mut self, ui: &mut egui::Ui) {
         let mut cmds = Vec::new();
         for s in &mut self.shares {
@@ -908,6 +925,38 @@ impl App {
                         }
                     });
                 s.chat.open = open;
+            }
+        }
+        if !self.shares.is_empty() && !self.hidden && !ui.ctx().input(|i| i.focused) {
+            let who = self.shares.iter().map(|s| s.who.as_str()).collect::<Vec<_>>().join(", ");
+            let what = if self.shares.iter().any(|s| s.control) { "{} sees and controls your screen" } else { "{} sees your screen" };
+            let line = tf(what, &[&who]);
+            let monitor = ui.ctx().input(|i| i.viewport().monitor_size).unwrap_or(vec2(1280.0, 800.0));
+            let size = vec2(560.0, 48.0);
+            let bar = egui::ViewportBuilder::default()
+                .with_title("Deskline")
+                .with_always_on_top()
+                .with_decorations(false)
+                .with_resizable(false)
+                .with_taskbar(false)
+                .with_inner_size(size)
+                .with_position(Pos2::new(((monitor.x - size.x) / 2.0).max(0.0), 12.0));
+            let stop = ui.ctx().show_viewport_immediate(egui::ViewportId::from_hash_of("sharing-bar"), bar, |ui, _| {
+                let mut stop = false;
+                let frame = egui::Frame::new().fill(RED).inner_margin(egui::Margin::symmetric(16, 8));
+                egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(strong(line.clone()).color(Color32::WHITE));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let label = RichText::new(t("Stop sharing")).color(RED);
+                            stop = ui.add(egui::Button::new(label).fill(Color32::WHITE).stroke(egui::Stroke::NONE)).clicked();
+                        });
+                    });
+                });
+                stop
+            });
+            if stop {
+                cmds.extend(self.shares.iter().map(|s| HostCmd::Stop { id: s.id }));
             }
         }
         for c in cmds {
@@ -991,11 +1040,10 @@ impl App {
             }
         }
         if let Some(tray) = self.tray.as_mut() {
-            let waiting = !self.requests.is_empty() || self.shares.iter().any(|s| s.asking);
-            tray.alert(waiting);
-            tray.tooltip(&match self.shares.len() {
-                0 => "Deskline".to_string(),
-                n => tf("Deskline: {} watching", &[&n.to_string()]),
+            tray.alert(!self.requests.is_empty() || !self.shares.is_empty());
+            tray.tooltip(&match self.shares.first() {
+                None => "Deskline".to_string(),
+                Some(s) => tf(if s.control { "{} sees and controls your screen" } else { "{} sees your screen" }, &[&s.who]),
             });
         }
         if let Some(u) = self.updater.as_mut() {
@@ -1014,8 +1062,10 @@ impl App {
                 }
             }
         }
-        // Closing keeps this computer reachable from the tray, unless the service does that.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.tray.is_some() && self.views.is_empty() {
+        // Closing keeps this computer reachable from the tray, unless the service does that, and
+        // never hides the red bar while someone is in.
+        let idle = self.views.is_empty() && self.shares.is_empty();
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.tray.is_some() && idle {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
             self.hidden = true;
@@ -1182,11 +1232,12 @@ fn open(path: &std::path::Path) {
 fn chat_panel(ui: &mut egui::Ui, chat: &mut Chat) -> Option<String> {
     let mut sent = None;
     egui::Panel::bottom(ui.scope_id().with("draft")).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 8))).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            let field = TextEdit::singleline(&mut chat.draft).hint_text(t("Message")).desired_width(ui.available_width() - 72.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let clicked = primary(ui, t("Send")).clicked();
+            let field = TextEdit::singleline(&mut chat.draft).hint_text(t("Message")).desired_width(ui.available_width());
             let r = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            if (primary(ui, t("Send")).clicked() || enter) && !chat.draft.trim().is_empty() {
+            if (clicked || enter) && !chat.draft.trim().is_empty() {
                 let text = std::mem::take(&mut chat.draft);
                 chat.lines.push((true, text.clone()));
                 sent = Some(text);
@@ -1196,7 +1247,7 @@ fn chat_panel(ui: &mut egui::Ui, chat: &mut Chat) -> Option<String> {
     });
     ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
         for (mine, text) in &chat.lines {
-            ui.label(muted(if *mine { t("You") } else { t("Them") }).size(13.0));
+            ui.label(muted(if *mine { t("You") } else { t("Them") }));
             ui.label(RichText::new(text).color(INK));
             ui.add_space(8.0);
         }
@@ -1231,7 +1282,7 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
         }
     });
     for (name, done, total) in &v.transfers {
-        ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(name.as_str()).fill(look::DUSK[2]));
+        ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(name.as_str()).fill(look::HOVER));
     }
     ui.add_space(8.0);
     look::hairline(ui);
@@ -1258,7 +1309,7 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
                         }
                     } else {
                         ui.label(RichText::new(&e.name).color(INK));
-                        ui.label(muted(size(e.size)).size(13.0));
+                        ui.label(muted(size(e.size)));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if quiet(ui, t("Download")).on_hover_text(t("Into your Downloads")).clicked() {

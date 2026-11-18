@@ -37,6 +37,9 @@ pub fn install(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert("inter".into(), Arc::new(FontData::from_static(include_bytes!("../assets/fonts/Inter-Regular.ttf"))));
     fonts.font_data.insert("inter-medium".into(), Arc::new(FontData::from_static(include_bytes!("../assets/fonts/Inter-Medium.ttf"))));
+    // luannzin.com's code face, for the code and anything measured.
+    fonts.font_data.insert("geist-mono".into(), Arc::new(FontData::from_static(include_bytes!("../assets/fonts/GeistMono-Regular.ttf"))));
+    fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "geist-mono".into());
     let fallbacks = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     fonts.families.insert(FontFamily::Proportional, [vec!["inter".into()], fallbacks.clone()].concat());
     fonts.families.insert(FontFamily::Name(MEDIUM.into()), [vec!["inter-medium".into()], fallbacks].concat());
@@ -71,7 +74,7 @@ pub fn install(ctx: &egui::Context) {
             (TextStyle::Body, FontId::proportional(SIZE)),
             (TextStyle::Button, FontId::proportional(SIZE)),
             (TextStyle::Heading, FontId::new(SIZE, FontFamily::Name(MEDIUM.into()))),
-            (TextStyle::Small, FontId::proportional(13.0)),
+            (TextStyle::Small, FontId::proportional(SIZE)),
             (TextStyle::Monospace, FontId::monospace(14.0)),
         ]
         .into();
@@ -118,25 +121,39 @@ pub fn hairline(ui: &mut Ui) {
     ui.painter().rect_filled(rect, 0.0, HAIRLINE);
 }
 
-/// A row that lights up as a tile under the pointer, like luannzin.com's lists. Returns the
-/// row's own response (hover, click) beside what `add` returned.
+/// A row that lights up as a tile under the pointer, like luannzin.com's lists. The text stays
+/// in line with the column; the tile reaches 12px past it on both sides. Returns the row's own
+/// response (hover, click) beside what `add` returned.
 pub fn row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> (Response, R) {
     let bg = ui.painter().add(Shape::Noop);
-    let inner = egui::Frame::new().inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+    let inner = egui::Frame::new().inner_margin(Margin::symmetric(0, 8)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         add(ui)
     });
-    let response = ui.interact(inner.response.rect, inner.response.id.with("row"), Sense::hover());
+    let rect = inner.response.rect.expand2(vec2(12.0, 0.0));
+    let response = ui.interact(rect, inner.response.id.with("row"), Sense::hover());
     if response.hovered() {
-        ui.painter().set(bg, Shape::rect_filled(inner.response.rect, 14.0, TILE));
+        ui.painter().set(bg, Shape::rect_filled(rect, 14.0, TILE));
     }
     (response, inner.inner)
 }
 
-/// This computer's code, big enough to read over the phone: four groups a line, in a well.
+/// A close mark drawn as two strokes (no glyph): muted, ink under the pointer.
+pub fn close(ui: &mut Ui) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+    let color = if response.hovered() { INK } else { MUTED };
+    let r = rect.shrink(4.5);
+    let stroke = Stroke::new(1.5, color);
+    ui.painter().line_segment([r.left_top(), r.right_bottom()], stroke);
+    ui.painter().line_segment([r.right_top(), r.left_bottom()], stroke);
+    response
+}
+
+/// This computer's code, big enough to read over the phone, in a well: three even lines (the 13
+/// groups go 5, 5, 3), never a lone group dangling at the end.
 pub fn code(ui: &mut Ui, code: &str) {
     let groups: Vec<&str> = code.split(' ').collect();
-    let lines: Vec<String> = groups.chunks(4).map(|c| c.join("  ")).collect();
+    let lines: Vec<String> = groups.chunks(groups.len().div_ceil(3).max(1)).map(|c| c.join("  ")).collect();
     egui::Frame::new().fill(WELL).corner_radius(14).inner_margin(Margin::symmetric(20, 16)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         for l in lines {
@@ -146,15 +163,20 @@ pub fn code(ui: &mut Ui, code: &str) {
 }
 
 /// Paint `rect` with 2px dots on a 3px grid; `at(column, row, columns, rows)` says each cell's
-/// colour, or None for none.
+/// colour, or None for none. Cells are whole device pixels, so the dither stays crisp at 125%
+/// and 150% scaling instead of smearing.
 fn dots(ui: &Ui, rect: Rect, mut at: impl FnMut(usize, usize, usize, usize) -> Option<Color32>) {
-    let (cols, rows) = ((rect.width() / 3.0) as usize, (rect.height() / 3.0) as usize);
+    let ppp = ui.ctx().pixels_per_point();
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    let (cell, dot) = ((3.0 * ppp).round().max(2.0) / ppp, (2.0 * ppp).round().max(1.0) / ppp);
+    let origin = egui::pos2(snap(rect.min.x), snap(rect.min.y));
+    let (cols, rows) = ((rect.width() / cell) as usize, (rect.height() / cell) as usize);
     let painter = ui.painter_at(rect);
     for c in 0..cols {
         for r in 0..rows {
             if let Some(color) = at(c, r, cols, rows) {
-                let p = rect.min + vec2(c as f32 * 3.0, r as f32 * 3.0);
-                painter.rect_filled(Rect::from_min_size(p, vec2(2.0, 2.0)), 0.0, color);
+                let p = origin + vec2(c as f32 * cell, r as f32 * cell);
+                painter.rect_filled(Rect::from_min_size(p, vec2(dot, dot)), 0.0, color);
             }
         }
     }
@@ -216,7 +238,10 @@ pub fn waiting(ui: &mut Ui, width: f32) {
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
 }
 
-/// The mark at a whole multiple of its pixels.
+/// The mark at the whole multiple of its pixels nearest `size`, in device pixels, so no row or
+/// column of the art is dropped or doubled.
 pub fn mark(ui: &mut Ui, texture: &egui::TextureHandle, size: f32) -> Response {
-    ui.add(egui::Image::new(texture).fit_to_exact_size(Vec2::splat(size)))
+    let (ppp, art) = (ui.ctx().pixels_per_point(), texture.size()[0] as f32);
+    let k = (size * ppp / art).round().max(1.0);
+    ui.add(egui::Image::new(texture).fit_to_exact_size(Vec2::splat(k * art / ppp)))
 }
