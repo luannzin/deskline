@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds dist/deskline_amd64.deb. Build on Ubuntu 22.04 (the oldest glibc and PipeWire we
-# support) after tools/install-linux-deps.sh, so it runs on 22.04 and newer:
+# Builds dist/deskline_amd64.deb. Build on Debian 12 (the oldest glibc and PipeWire we support)
+# after tools/install-linux-deps.sh, so it runs on Debian 12, Ubuntu 24.04 and newer:
 #   tools/build-deb.sh
 # Install with: sudo apt install ./dist/deskline_amd64.deb
 set -euo pipefail

@@ -30,7 +30,7 @@ Grab the file for your system from [Releases](https://github.com/luannzin/deskli
 | System | File | |
 |---|---|---|
 | Windows 10/11 | `deskline.exe` | One file. Run it as is, or click **Install Deskline on this computer** to install it for everyone with its service (see below). |
-| Ubuntu 22.04+ / Debian 12+ | `deskline_amd64.deb` | `sudo apt install ./deskline_amd64.deb` |
+| Ubuntu 24.04+ / Debian 12+ | `deskline_amd64.deb` | `sudo apt install ./deskline_amd64.deb` |
 | macOS 11+ | `Deskline.dmg` | Drag Deskline into Applications. Allow it under **System Settings → Privacy & Security → Screen Recording** and **Accessibility** when it asks. |
 
 The builds aren't signed with a paid certificate yet, so Windows SmartScreen says **More info →
@@ -131,7 +131,8 @@ Not there yet: session recording, Wake-on-LAN, TCP tunnels, and phone apps.
 ## Build
 
 ```bash
-# Linux: PipeWire, libclang (bindings), nasm (fast encoder), sound and display headers
+# Linux (Debian 12+ / Ubuntu 24.04+: PipeWire 0.3.65+ headers): libclang (bindings), nasm
+# (fast encoder), sound and display headers
 tools/install-linux-deps.sh
 cargo build --release            # target/release/deskline
 

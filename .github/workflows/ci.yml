@@ -10,16 +10,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu-22.04: the oldest PipeWire and glibc the .deb supports
-        os: [ubuntu-22.04, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # Debian 12: the oldest glibc (2.36) and PipeWire (0.3.65, what the pipewire crate
+          # needs) the .deb supports
+          - os: ubuntu-latest
+            container: debian:12
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@v4
+      - name: Build dependencies and Rust (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          tools/install-linux-deps.sh
+          curl --proto '=https' -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: rustup update stable --no-self-update && rustup default stable
 
-      - name: Build dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: tools/install-linux-deps.sh
       # nasm: the fast H.264 encoder
       - if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1

@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Installs what building Deskline needs on Ubuntu/Debian (CI runs this too; add new ones here):
-# PipeWire headers and libclang for its bindings, nasm for the fast H.264 encoder, and the
-# keyboard, Wayland, X11 and sound headers.
+# Installs what building Deskline needs on Debian 12+ / Ubuntu 24.04+ (CI runs this too, as root
+# in a debian:12 container; add new ones here): the C/C++ toolchain and dpkg-dev for the .deb,
+# PipeWire headers (0.3.65+, what the pipewire crate needs) and libclang for its bindings, nasm
+# for the fast H.264 encoder, and the keyboard, Wayland, X11 and sound headers.
 #   tools/install-linux-deps.sh
 set -euo pipefail
-sudo apt-get update
-sudo apt-get install -y --no-install-recommends \
+sudo=""
+[ "$(id -u)" = 0 ] || sudo=sudo
+$sudo apt-get update
+$sudo apt-get install -y --no-install-recommends \
+    build-essential ca-certificates curl \
     pkg-config nasm libclang-dev libpipewire-0.3-dev \
     libxkbcommon-dev libwayland-dev \
     libxcb1-dev libxcb-shm0-dev libxcb-randr0-dev libxcb-xfixes0-dev libxcb-xtest0-dev \
