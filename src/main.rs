@@ -8,10 +8,12 @@ mod codec;
 mod desktop;
 mod files;
 mod host;
+mod i18n;
 #[cfg(windows)]
 mod ipc;
 #[cfg(windows)]
 mod keyhook;
+mod look;
 mod net;
 mod proto;
 #[cfg(windows)]

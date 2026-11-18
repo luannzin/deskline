@@ -30,8 +30,8 @@ fn icon(png: &[u8]) -> Icon {
 impl Tray {
     /// None when the desktop has no tray. Call on the UI thread (macOS requires it).
     pub fn start(ctx: &Context) -> Option<Tray> {
-        let open = MenuItem::new("Open Deskline", true, None);
-        let quit = MenuItem::new("Quit", true, None);
+        let open = MenuItem::new(crate::i18n::t("Open Deskline"), true, None);
+        let quit = MenuItem::new(crate::i18n::t("Quit"), true, None);
         let menu = Menu::new();
         menu.append_items(&[&open, &quit]).ok()?;
         let (open_id, quit_id) = (open.id().clone(), quit.id().clone());

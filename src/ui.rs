@@ -1,11 +1,13 @@
-//! The window: this computer's code, connecting to others (with an address book), the prompts
-//! when someone wants in, red bars while sharing, a tab per screen you're viewing, and settings.
+//! The window. Two jobs, two people: the person being helped sees their code, big, and one
+//! question when someone wants in, then a red bar for as long as anyone is; the helper pastes a
+//! code, waits on a line of dusk being drawn, and works in a tab per screen. Built from
+//! luannzin.com's quiet system (look.rs), in English or Portuguese (i18n.rs).
 use std::path::PathBuf;
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align, Color32, Event as UiEvent, Id, Key, Layout, Modal, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect,
-    RichText, ScrollArea, Sense, TextEdit, TextureHandle, TextureOptions, Vec2, ViewportCommand, scroll_area::ScrollSource,
+    self, Align, Color32, Event as UiEvent, Id, Key, Layout, Modal, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, RichText,
+    ScrollArea, Sense, TextEdit, TextureHandle, TextureOptions, Vec2, ViewportCommand, scroll_area::ScrollSource, vec2,
 };
 use iroh::{Endpoint, EndpointId};
 use tokio::sync::mpsc;
@@ -14,6 +16,8 @@ use crate::codec::Quality;
 use crate::desktop::{self, ALT, CTRL, Input, Monitor, SHIFT};
 use crate::files::Listing;
 use crate::host::{HostCmd, HostEvent};
+use crate::i18n::{t, tf};
+use crate::look::{self, GREEN, GROUND, HAIRLINE, INK, MUTED, RED, SOFT, muted, primary, primary_enabled, quiet, soft, strong};
 use crate::proto::Ask;
 use crate::settings::{self, Peer, Store};
 use crate::tray::{Tray, TrayMsg};
@@ -38,63 +42,8 @@ pub struct Start {
     pub connect: Option<(String, Option<String>)>,
 }
 
-// luannzin.com's neutral system: near-black ground, paper ink in three tiers, hairlines, no
-// accent colour. Colour means something here: red while sharing, green for control, and the
-// dusk in the dither strip and the mark, which are art.
-const GROUND: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
-const TILE: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x1f);
-const WELL: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x1c);
-const HAIRLINE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
-const RAISED: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
-const HOVER: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
-const PRESSED: Color32 = Color32::from_rgb(0x40, 0x40, 0x40);
-const INK: Color32 = Color32::from_rgb(0xf5, 0xf5, 0xf5);
-const SOFT: Color32 = Color32::from_rgb(0xb2, 0xb2, 0xb2);
-const MUTED: Color32 = Color32::from_rgb(0x81, 0x81, 0x81);
-const RED: Color32 = Color32::from_rgb(150, 40, 40);
-const GREEN: Color32 = Color32::from_rgb(90, 200, 120);
-/// The dusk of luannzin.com's dither strip, sky to horizon.
-const DUSK: [Color32; 4] =
-    [Color32::from_rgb(0x3a, 0x2a, 0x6b), Color32::from_rgb(0x7a, 0x33, 0x61), Color32::from_rgb(0xe0, 0x70, 0x3f), Color32::from_rgb(0xff, 0xd1, 0x80)];
-const BAYER: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
-
-fn theme(ctx: &egui::Context) {
-    let mut v = egui::Visuals::dark();
-    (v.panel_fill, v.window_fill, v.faint_bg_color, v.extreme_bg_color, v.code_bg_color) = (GROUND, TILE, TILE, WELL, WELL);
-    v.window_stroke = egui::Stroke::new(1.0, HAIRLINE);
-    v.hyperlink_color = INK;
-    v.weak_text_color = Some(MUTED);
-    v.selection.bg_fill = PRESSED;
-    v.selection.stroke = egui::Stroke::new(1.0, INK);
-    let w = &mut v.widgets;
-    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, HAIRLINE);
-    w.noninteractive.fg_stroke = egui::Stroke::new(1.0, SOFT);
-    for (s, fill) in [(&mut w.inactive, RAISED), (&mut w.hovered, HOVER), (&mut w.active, PRESSED), (&mut w.open, HOVER)] {
-        (s.bg_fill, s.weak_bg_fill) = (fill, fill);
-        s.fg_stroke = egui::Stroke::new(1.0, INK);
-        s.bg_stroke = egui::Stroke::new(1.0, if fill == RAISED { HAIRLINE } else { PRESSED });
-    }
-    // Same look whatever the system's light or dark setting.
-    ctx.all_styles_mut(|s| s.visuals = v.clone());
-}
-
-/// luannzin.com's footer strip: four blocks of the dusk, each denser than the last, 2px dots on
-/// a 3px grid in a Bayer pattern.
-fn dither_strip(ui: &mut egui::Ui, height: f32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
-    let (cols, rows) = ((rect.width() / 3.0) as usize, (height / 3.0) as usize);
-    let painter = ui.painter_at(rect);
-    for c in 0..cols {
-        let block = (c * 4 / cols.max(1)).min(3);
-        let fill = (block + 1) as f32 / 4.0;
-        for r in 0..rows {
-            if (BAYER[(r % 4) * 4 + c % 4] as f32) / 16.0 < fill {
-                let at = rect.min + egui::vec2(c as f32 * 3.0, r as f32 * 3.0);
-                painter.rect_filled(Rect::from_min_size(at, egui::vec2(2.0, 2.0)), 0.0, DUSK[block]);
-            }
-        }
-    }
-}
+/// The reading column, like luannzin.com's.
+const COLUMN: f32 = 560.0;
 
 pub struct App {
     ep: Endpoint,
@@ -181,7 +130,7 @@ struct Viewing {
     peer: EndpointId,
     who: Option<String>,
     status: String,
-    link: String,
+    link: Option<(&'static str, u32)>,
     control: Control,
     tex: Option<TextureHandle>,
     mods: Modifiers,
@@ -214,7 +163,7 @@ struct Form {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, start: Start) -> Self {
         let ctx = cc.egui_ctx.clone();
-        theme(&ctx);
+        look::install(&ctx);
         let Start { ep, home, store, host, mut events, service, background, settings, connect } = start;
         // Host events wake the window, even while it's hidden in the tray.
         let (host_tx, host_events) = mpsc::unbounded_channel();
@@ -334,15 +283,15 @@ impl App {
             }
             HostEvent::Note { id, text } => {
                 let who = self.shares.iter().find(|s| s.id == id).map_or("", |s| s.who.as_str());
-                self.note = format!("{who}: {text}");
+                self.note = format!("{who}: {}", t(&text));
             }
             HostEvent::ShareEnded { id, why } => {
                 self.shares.retain(|s| s.id != id);
-                self.note = why;
+                self.note = t(&why);
             }
             HostEvent::Error(e) => {
-                self.form.error = e.clone();
-                self.note = e;
+                self.form.error = t(&e);
+                self.note = t(&e);
             }
         }
     }
@@ -351,7 +300,10 @@ impl App {
         let Some(i) = self.views.iter().position(|v| v.session.id == id) else { return };
         let v = &mut self.views[i];
         match e {
-            ViewEvent::Status(t) => v.status = t,
+            ViewEvent::Status(s) => {
+                v.status = t(&s);
+                v.link = None;
+            }
             ViewEvent::Viewing { who, control } => {
                 let _ = self.store.met(&v.peer.to_z32(), &who);
                 v.who = Some(who);
@@ -363,26 +315,26 @@ impl App {
             }
             ViewEvent::Control(on) => {
                 if !on && v.control == Control::Asked {
-                    v.note("They said no to control.");
+                    v.note(&t("They said no to control."));
                 }
                 v.control = if on { Control::On } else { Control::Off };
             }
             ViewEvent::Monitors { list, current } => (v.monitors, v.current) = (list, current),
-            ViewEvent::Link(t) => {
-                v.link = t;
+            ViewEvent::Link { kind, ms } => {
+                v.link = Some((kind, ms));
                 v.status.clear();
             }
-            ViewEvent::Chat(t) => {
-                v.chat.lines.push((false, t));
+            ViewEvent::Chat(text) => {
+                v.chat.lines.push((false, text));
                 if v.panel != Panel::Chat {
                     v.chat.unread += 1;
                 }
             }
-            ViewEvent::Note(t) => v.note(&t),
+            ViewEvent::Note(text) => v.note(&t(&text)),
             ViewEvent::Privacy(on) => v.privacy = on,
             ViewEvent::Listing(l) => v.listing = Some(l),
             ViewEvent::Transfer { name, done, total } => {
-                v.transfers.retain(|t| t.0 != name);
+                v.transfers.retain(|x| x.0 != name);
                 if done < total {
                     v.transfers.push((name, done, total));
                 }
@@ -401,18 +353,18 @@ impl App {
                     self.need_password = true;
                     self.partner = net::code(peer);
                 }
-                self.note = why;
+                self.note = t(&why);
             }
         }
     }
 
     fn connect(&mut self, code: &str, password: Option<String>, remember: bool) {
         let Some(peer) = net::parse_code(code) else {
-            self.note = "That code doesn't look right. It's 52 letters and digits.".into();
+            self.note = t("That code doesn't look right. It's 52 letters and digits.");
             return;
         };
         if peer == self.ep.id() || self.code.replace(' ', "") == peer.to_z32() {
-            self.note = "That's this computer's code. Paste your partner's.".into();
+            self.note = t("That's this computer's code. Paste your partner's.");
             return;
         }
         let s = self.store.get();
@@ -423,8 +375,8 @@ impl App {
             session,
             peer,
             who: None,
-            status: "Connecting…".into(),
-            link: String::new(),
+            status: t("Connecting…"),
+            link: None,
             control: Control::Off,
             tex: None,
             mods: Modifiers::NONE,
@@ -448,23 +400,31 @@ impl App {
         self.password.clear();
     }
 
+    /// The top bar: the mark and the name, a tab per screen being viewed, Settings at the end.
+    /// The current tab is ink with a hairline under it; the others are soft.
     fn tabs(&mut self, ui: &mut egui::Ui) {
         let mut close = None;
-        egui::Panel::top("tabs").show(ui, |ui| {
+        let frame = egui::Frame::new().fill(GROUND).inner_margin(egui::Margin::symmetric(16, 10));
+        egui::Panel::top("tabs").frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Home, "Home");
+                if look::mark(ui, &self.mark, 24.0).interact(Sense::click()).clicked() {
+                    self.tab = Tab::Home;
+                }
+                ui.add_space(4.0);
+                tab(ui, &mut self.tab, Tab::Home, "Deskline".into());
                 for v in &self.views {
-                    let mut label = v.who.clone().unwrap_or_else(|| "Connecting…".into());
+                    ui.add_space(8.0);
+                    let mut label = v.who.clone().unwrap_or_else(|| t("Connecting…"));
                     if v.chat.unread > 0 {
-                        label.push_str(&format!(" ({})", v.chat.unread));
+                        label.push_str(&format!("  {}", v.chat.unread));
                     }
-                    ui.selectable_value(&mut self.tab, Tab::View(v.session.id), label);
-                    if ui.small_button("×").on_hover_text("Disconnect").clicked() {
+                    tab(ui, &mut self.tab, Tab::View(v.session.id), label);
+                    if quiet(ui, "×").on_hover_text(t("Disconnect")).clicked() {
                         close = Some(v.session.id);
                     }
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.selectable_value(&mut self.tab, Tab::Settings, "Settings");
+                    tab(ui, &mut self.tab, Tab::Settings, t("Settings"));
                 });
             });
         });
@@ -484,81 +444,75 @@ impl App {
         }
     }
 
+    /// Home, one column: this computer's code for the person being helped, then the field for
+    /// the helper, then the computers you've reached before, and the dusk strip to close it.
     fn home(&mut self, ui: &mut egui::Ui) {
-        ScrollArea::vertical().show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.set_max_width(460.0);
-                ui.add_space(20.0);
-                ui.add(egui::Image::new(&self.mark).fit_to_exact_size(egui::vec2(64.0, 64.0)));
-                ui.label(RichText::new("Deskline").size(22.0).color(INK));
-                ui.add_space(16.0);
-
-                card(ui, |ui| {
-                    ui.label(RichText::new("This computer").strong());
-                    ui.add_space(4.0);
-                    ui.label(RichText::new(&self.code).monospace().size(15.0));
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui.button("Copy my code").clicked() {
-                            ui.ctx().copy_text(self.code.replace(' ', ""));
-                            self.note = "Code copied. Send it to whoever needs to see this screen.".into();
-                        }
-                        let state = if self.password_on { "Unattended access is on" } else { "Unattended access is off" };
-                        if ui.link(state).clicked() {
-                            self.tab = Tab::Settings;
-                        }
-                    });
-                    #[cfg(windows)]
-                    if !self.service {
-                        ui.add_space(6.0);
-                        if ui.button("Install Deskline on this computer").on_hover_text("Starts with Windows and works at the sign-in screen, lock screen and admin prompts").clicked() {
-                            self.install();
-                        }
-                    }
-                });
-
-                ui.add_space(12.0);
-                card(ui, |ui| {
-                    ui.label(RichText::new("See a partner's screen").strong());
-                    ui.add_space(6.0);
-                    let field = ui.add(TextEdit::singleline(&mut self.partner).hint_text("Paste their code").desired_width(f32::INFINITY));
-                    let mut go = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                    if self.need_password {
-                        ui.add_space(6.0);
-                        let pw = ui.add(TextEdit::singleline(&mut self.password).password(true).hint_text("Their unattended-access password").desired_width(f32::INFINITY));
-                        go |= pw.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                        ui.checkbox(&mut self.remember, "Log in without the password next time");
-                    }
-                    ui.add_space(6.0);
-                    let ready = !self.partner.trim().is_empty();
-                    if ui.add_enabled(ready, egui::Button::new("Connect")).clicked() || (go && ready) {
-                        let password = (self.need_password && !self.password.is_empty()).then(|| self.password.clone());
-                        let (code, remember) = (self.partner.clone(), self.remember);
-                        self.connect(&code, password, remember);
-                    }
-                });
-
-                if !self.note.is_empty() {
-                    ui.add_space(10.0);
-                    ui.label(RichText::new(&self.note).weak());
+        column(ui, |ui| {
+            ui.add_space(40.0);
+            ui.label(strong(t("Your code")));
+            ui.label(soft(t("Send it to whoever is helping you. It never changes.")));
+            ui.add_space(8.0);
+            look::code(ui, &self.code);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if primary(ui, t("Copy code")).clicked() {
+                    ui.ctx().copy_text(self.code.replace(' ', ""));
+                    self.note = t("Copied. Paste it in a message to the person helping you.");
                 }
-                self.update_banner(ui);
-                self.contacts(ui);
-                ui.add_space(32.0);
-                dither_strip(ui, 32.0);
-                ui.add_space(16.0);
+                ui.add_space(8.0);
+                let state = if self.password_on { t("Unattended access is on") } else { t("Unattended access is off") };
+                ui.label(muted(state));
+                if quiet(ui, t("Change")).clicked() {
+                    self.tab = Tab::Settings;
+                }
             });
+            #[cfg(windows)]
+            if !self.service && quiet(ui, t("Install for the sign-in screen")).on_hover_text(t("Starts with Windows and works at the sign-in screen, lock screen and admin prompts")).clicked() {
+                self.install();
+            }
+
+            ui.add_space(40.0);
+            ui.label(strong(t("Connect to a computer")));
+            ui.add_space(4.0);
+            let mut go = false;
+            ui.horizontal(|ui| {
+                let field = TextEdit::singleline(&mut self.partner).hint_text(t("Paste their code")).desired_width(ui.available_width() - 104.0);
+                let field = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+                go = field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                let ready = !self.partner.trim().is_empty();
+                go = (primary_enabled(ui, ready, t("Connect")).clicked() || go) && ready;
+            });
+            if self.need_password {
+                let pw = TextEdit::singleline(&mut self.password).password(true).hint_text(t("Their unattended-access password"));
+                let pw = ui.add(pw.desired_width(f32::INFINITY).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+                go |= pw.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.partner.trim().is_empty();
+                ui.checkbox(&mut self.remember, t("Log in without the password next time"));
+            }
+            if go {
+                let password = (self.need_password && !self.password.is_empty()).then(|| self.password.clone());
+                let (code, remember) = (self.partner.clone(), self.remember);
+                self.connect(&code, password, remember);
+            }
+            if !self.note.is_empty() {
+                ui.add_space(4.0);
+                ui.label(soft(&self.note));
+            }
+            self.update_row(ui);
+            self.contacts(ui);
+            ui.add_space(56.0);
+            look::strip(ui, 24.0);
+            ui.add_space(24.0);
         });
     }
 
-    fn update_banner(&mut self, ui: &mut egui::Ui) {
+    fn update_row(&mut self, ui: &mut egui::Ui) {
         let Some(u) = self.updater.as_mut() else { return };
         let Some((tag, _)) = u.ready.clone() else { return };
-        ui.add_space(10.0);
+        ui.add_space(16.0);
         ui.horizontal(|ui| {
-            ui.label(format!("Deskline {tag} is ready."));
-            let label = if u.installing { "Updating…" } else { "Restart to update" };
-            if ui.add_enabled(!u.installing, egui::Button::new(label)).clicked() {
+            ui.label(soft(tf("Deskline {} is ready.", &[&tag])));
+            let label = if u.installing { t("Updating…") } else { t("Restart to update") };
+            if primary_enabled(ui, !u.installing, label).clicked() {
                 u.install();
             }
         });
@@ -569,17 +523,18 @@ impl App {
         if contacts.is_empty() {
             return;
         }
-        ui.add_space(16.0);
-        ui.label(RichText::new("Recent").strong());
+        ui.add_space(40.0);
+        ui.label(strong(t("Recent")));
         ui.add_space(4.0);
         let mut connect = None;
         for c in &contacts {
-            card(ui, |ui| {
+            look::row(ui, |ui| {
                 ui.horizontal(|ui| {
                     match self.renaming.as_mut().filter(|(id, _)| *id == c.id) {
                         Some((_, draft)) => {
-                            let r = ui.add(TextEdit::singleline(draft).desired_width(160.0));
-                            if r.lost_focus() || ui.button("Save").clicked() {
+                            let r = ui.add(TextEdit::singleline(draft).desired_width(200.0));
+                            r.request_focus();
+                            if r.lost_focus() || quiet(ui, t("Save")).clicked() {
                                 let alias = Some(draft.trim().to_string()).filter(|a| !a.is_empty());
                                 let id = c.id.clone();
                                 let _ = self.store.update(|s| {
@@ -592,20 +547,21 @@ impl App {
                         }
                         None => {
                             ui.vertical(|ui| {
-                                ui.label(RichText::new(c.label()).strong());
-                                ui.label(RichText::new(format!("{} · {}", &c.id[..8], settings::when(c.last))).weak().small());
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.label(strong(c.label()));
+                                ui.label(RichText::new(format!("{}  ·  {}", &c.id[..8], settings::when(c.last))).monospace().size(12.0).color(MUTED));
                             });
                         }
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("×").on_hover_text("Forget").clicked() {
+                        if quiet(ui, "×").on_hover_text(t("Forget")).clicked() {
                             let id = c.id.clone();
                             let _ = self.store.update(|s| s.contacts.retain(|x| x.id != id));
                         }
-                        if ui.small_button("Rename").clicked() {
+                        if quiet(ui, t("Rename")).clicked() {
                             self.renaming = Some((c.id.clone(), c.alias.clone().unwrap_or_default()));
                         }
-                        if ui.button("Connect").clicked() {
+                        if ui.button(t("Connect")).clicked() {
                             connect = Some(c.id.clone());
                         }
                     });
@@ -631,79 +587,84 @@ impl App {
             }
             Err(e) => eprintln!("deskline: install: {e}"),
         });
-        self.note = "Installing… confirm the Windows prompt.".into();
+        self.note = t("Installing… confirm the Windows prompt.");
     }
 
+    /// Settings, the same column: sections divided by hairlines, never boxed.
     fn settings(&mut self, ui: &mut egui::Ui) {
-        ScrollArea::vertical().show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.set_max_width(520.0);
-                ui.add_space(16.0);
-                ui.heading("Settings");
-                ui.add_space(12.0);
-                card(ui, |ui| self.security(ui));
-                ui.add_space(10.0);
-                card(ui, |ui| self.preferences(ui));
-                ui.add_space(10.0);
-                card(ui, |ui| self.system(ui));
-                ui.add_space(10.0);
-                ui.label(RichText::new(format!("Deskline {}", env!("CARGO_PKG_VERSION"))).weak());
-            });
+        column(ui, |ui| {
+            ui.add_space(40.0);
+            self.security(ui);
+            ui.add_space(24.0);
+            look::hairline(ui);
+            ui.add_space(16.0);
+            self.preferences(ui);
+            ui.add_space(24.0);
+            look::hairline(ui);
+            ui.add_space(16.0);
+            self.system(ui);
+            ui.add_space(32.0);
+            ui.label(muted(format!("Deskline {}", env!("CARGO_PKG_VERSION"))));
+            ui.add_space(24.0);
         });
     }
 
     /// Who gets in without a click. With the service, only an elevated window may change it.
     fn security(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("Unattended access").strong());
-        ui.label(
-            RichText::new("With a password, people who know it can connect and control this computer when nobody is here to click Accept.")
-                .weak(),
-        );
-        ui.add_space(6.0);
+        ui.label(strong(t("Unattended access")));
+        ui.label(soft(t(
+            "With a password, people who know it can connect and control this computer when nobody is here to click Accept.",
+        )));
+        ui.add_space(8.0);
         #[cfg(windows)]
         let locked = self.service && !service::is_elevated();
         #[cfg(not(windows))]
         let locked = false;
         if locked {
-            ui.label(if self.password_on { "A password is set." } else { "No password is set." });
-            if ui.button("Change as administrator").clicked() {
+            ui.label(muted(if self.password_on { t("A password is set.") } else { t("No password is set.") }));
+            if ui.button(t("Change as administrator")).clicked() {
                 #[cfg(windows)]
                 std::thread::spawn(|| service::elevate(&["--settings"]));
             }
         } else {
-            ui.label(if self.password_on { "A password is set. Set a new one to replace it." } else { "No password is set." });
-            ui.add(TextEdit::singleline(&mut self.form.pw).password(true).hint_text("New password (8 characters or more)"));
-            ui.add(TextEdit::singleline(&mut self.form.pw2).password(true).hint_text("Repeat it"));
+            ui.label(muted(if self.password_on { t("A password is set. Set a new one to replace it.") } else { t("No password is set.") }));
+            ui.add(secret(&mut self.form.pw, t("New password (8 characters or more)")));
+            ui.add(secret(&mut self.form.pw2, t("Repeat it")));
             ui.horizontal(|ui| {
-                if ui.button("Set password").clicked() {
+                if primary(ui, t("Set password")).clicked() {
                     if self.form.pw.chars().count() < 8 {
-                        self.form.error = "Use at least 8 characters.".into();
+                        self.form.error = t("Use at least 8 characters.");
                     } else if self.form.pw != self.form.pw2 {
-                        self.form.error = "The two passwords are different.".into();
+                        self.form.error = t("The two passwords are different.");
                     } else {
                         let _ = self.host.send(HostCmd::SetPassword(Some(std::mem::take(&mut self.form.pw))));
                         self.form.pw2.clear();
-                        self.form.error = "Password set.".into();
+                        self.form.error = t("Password set.");
                     }
                 }
-                if self.password_on && ui.button("Turn off").clicked() {
+                if self.password_on && quiet(ui, t("Turn off")).clicked() {
                     let _ = self.host.send(HostCmd::SetPassword(None));
-                    self.form.error = "Unattended access is off.".into();
+                    self.form.error = t("Unattended access is off.");
                 }
             });
             if !self.form.error.is_empty() {
-                ui.label(RichText::new(&self.form.error).weak());
+                ui.label(soft(&self.form.error));
             }
         }
         if !self.trusted.is_empty() {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Always allowed").strong());
+            ui.add_space(16.0);
+            ui.label(strong(t("Always allowed")));
             for p in self.trusted.clone() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} ({})", p.name, &p.id[..8]));
-                    if ui.add_enabled(!locked, egui::Button::new("Remove").small()).clicked() {
-                        let _ = self.host.send(HostCmd::Untrust(p.id.clone()));
-                    }
+                look::row(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(&p.name).color(INK));
+                        ui.label(RichText::new(&p.id[..8]).monospace().size(12.0).color(MUTED));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add_enabled(!locked, egui::Button::new(soft(t("Remove"))).frame_when_inactive(false)).clicked() {
+                                let _ = self.host.send(HostCmd::Untrust(p.id.clone()));
+                            }
+                        });
+                    });
                 });
             }
         }
@@ -712,14 +673,17 @@ impl App {
     fn preferences(&mut self, ui: &mut egui::Ui) {
         let mut s = self.store.get();
         let before = s.clone();
-        ui.label(RichText::new("Sessions").strong());
-        ui.checkbox(&mut s.allow_control, "When I accept someone, let them control by default");
-        ui.checkbox(&mut s.sound, "Hear the other computer's sound");
+        ui.label(strong(t("Sessions")));
+        ui.add_space(4.0);
+        ui.checkbox(&mut s.allow_control, t("When I accept someone, let them control by default"));
+        ui.checkbox(&mut s.sound, t("Hear the other computer's sound"));
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label("Picture:");
-            ui.radio_value(&mut s.quality, Quality::Balanced, "Balanced");
-            ui.radio_value(&mut s.quality, Quality::Sharp, "Sharp text");
-            ui.radio_value(&mut s.quality, Quality::Smooth, "Slow connection");
+            ui.label(soft(t("Picture")));
+            ui.add_space(8.0);
+            for q in [Quality::Balanced, Quality::Sharp, Quality::Smooth] {
+                ui.selectable_value(&mut s.quality, q, quality_name(q));
+            }
         });
         if s != before {
             let _ = self.store.update(|x| *x = s);
@@ -727,69 +691,85 @@ impl App {
     }
 
     fn system(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new("This computer").strong());
+        ui.label(strong(t("This computer")));
+        ui.add_space(4.0);
         if !self.service {
             let mut on = autostart::enabled();
-            if ui.checkbox(&mut on, "Start Deskline when I sign in").changed() {
+            if ui.checkbox(&mut on, t("Start Deskline when I sign in")).changed() {
                 if let Err(e) = autostart::set(on) {
-                    self.note = format!("Couldn't change that: {e}");
+                    self.note = tf("Couldn't change that: {}", &[&e.to_string()]);
                 }
             }
         }
         #[cfg(windows)]
         if self.service {
-            ui.label("Installed: Deskline starts with Windows and works at the sign-in screen.");
-            if ui.button("Uninstall").clicked() {
+            ui.label(soft(t("Installed: Deskline starts with Windows and works at the sign-in screen.")));
+            if quiet(ui, t("Uninstall")).clicked() {
                 std::thread::spawn(|| {
                     if service::elevate(&["--uninstall"]).is_ok() {
                         std::process::exit(0);
                     }
                 });
             }
-        } else if ui.button("Install for all users (starts with Windows, works at the sign-in screen)").clicked() {
-            self.install();
+        } else {
+            ui.horizontal(|ui| {
+                if ui.button(t("Install for all users")).clicked() {
+                    self.install();
+                }
+                ui.label(muted(t("Starts with Windows and works at the sign-in screen.")));
+            });
         }
-        ui.add_space(8.0);
-        ui.label(RichText::new("Relay server").strong());
-        ui.label(RichText::new("Leave empty for the public relays. Your own: run iroh-relay and paste its URL. Restart Deskline after changing.").weak());
+        ui.add_space(16.0);
+        ui.label(strong(t("Relay server")));
+        ui.label(soft(t(
+            "Leave empty for the public relays. Your own: run iroh-relay and paste its URL. Restart Deskline after changing.",
+        )));
         ui.horizontal(|ui| {
-            ui.add(TextEdit::singleline(&mut self.form.relay).hint_text("https://relay.example.com").desired_width(280.0));
-            if ui.button("Save").clicked() {
+            let field = TextEdit::singleline(&mut self.form.relay).hint_text("https://relay.example.com").desired_width(ui.available_width() - 80.0);
+            ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+            if ui.button(t("Save")).clicked() {
                 let relay = Some(self.form.relay.trim().to_string()).filter(|r| !r.is_empty());
                 let _ = self.store.update(|s| s.relay = relay);
-                self.note = "Saved. Restart Deskline to use it.".into();
+                self.note = t("Saved. Restart Deskline to use it.");
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(16.0);
         if self.service {
-            ui.label(RichText::new("Session log: %ProgramData%\\Deskline\\sessions.log (administrators)").weak());
-        } else if ui.button("Open session log").clicked() {
+            ui.label(muted(t("Session log: %ProgramData%\\Deskline\\sessions.log (administrators)")));
+        } else if quiet(ui, t("Open session log")).clicked() {
             open(&self.store.dir().join("sessions.log"));
         }
     }
 
+    /// Waiting on the other computer: whose code, what's happening, and the line between the
+    /// two computers being drawn in dusk while it happens.
     fn connecting(&mut self, ui: &mut egui::Ui, i: usize) {
         let mut cancel = false;
         let mut login = None;
         let v = &mut self.views[i];
         ui.vertical_centered(|ui| {
             ui.set_max_width(360.0);
-            ui.add_space(80.0);
-            ui.spinner();
-            ui.add_space(12.0);
-            ui.label(&v.status);
+            ui.add_space((ui.available_height() * 0.22).max(40.0));
+            ui.label(RichText::new(&net::code(v.peer)[..19]).monospace().color(MUTED));
+            ui.add_space(4.0);
+            ui.label(strong(&v.status));
             ui.add_space(16.0);
-            if v.status.starts_with("Waiting") {
-                ui.label(RichText::new("Or log in with their unattended-access password:").weak());
-                let r = ui.add(TextEdit::singleline(&mut v.password).password(true).desired_width(f32::INFINITY));
-                ui.checkbox(&mut v.remember, "Log in without the password next time");
+            look::waiting(ui, 280.0);
+            ui.add_space(24.0);
+            if v.status == t("Waiting for them to accept…") {
+                look::hairline(ui);
+                ui.add_space(16.0);
+                ui.label(soft(t("Or log in with their unattended-access password")));
+                let field = TextEdit::singleline(&mut v.password).password(true).desired_width(f32::INFINITY);
+                let r = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+                ui.checkbox(&mut v.remember, t("Log in without the password next time"));
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                if (ui.button("Log in").clicked() || enter) && !v.password.is_empty() {
+                if (primary_enabled(ui, !v.password.is_empty(), t("Log in")).clicked() || enter) && !v.password.is_empty() {
                     login = Some((net::code(v.peer), v.password.clone(), v.remember));
                 }
                 ui.add_space(8.0);
             }
-            cancel = ui.button("Cancel").clicked();
+            cancel = quiet(ui, t("Cancel")).clicked();
         });
         if cancel || login.is_some() {
             let id = self.views[i].session.id;
@@ -807,96 +787,21 @@ impl App {
         let control = v.control == Control::On;
 
         if !v.fullscreen {
-            egui::Panel::top("viewer").show(ui, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(v.who.as_deref().unwrap_or("…")).strong());
-                    let status = if v.status.is_empty() { &v.link } else { &v.status };
-                    ui.label(RichText::new(status).weak());
-                    ui.separator();
-                    match v.control {
-                        Control::Off => {
-                            if ui.button("Ask for control").clicked() {
-                                v.session.send(Ask::WantControl);
-                                v.control = Control::Asked;
-                            }
-                        }
-                        Control::Asked => {
-                            ui.label("Waiting for them to allow control…");
-                        }
-                        Control::On => {
-                            ui.label(RichText::new("You have control").color(GREEN));
-                            if ui.button("Ctrl+Alt+Del").clicked() {
-                                v.session.send(Ask::Input(Input::CtrlAltDel));
-                            }
-                            let label = if v.privacy { "Privacy: on" } else { "Privacy: off" };
-                            if ui.button(label).on_hover_text("Blank their screen and lock their own mouse and keyboard").clicked() {
-                                v.session.send(Ask::Privacy(!v.privacy));
-                            }
-                        }
-                    }
-                    if v.monitors.len() > 1 {
-                        let current = v.monitors.get(v.current).map_or("Screen".into(), |m| m.name.clone());
-                        let mut pick = v.current;
-                        egui::ComboBox::from_id_salt("monitor").selected_text(current).show_ui(ui, |ui| {
-                            for (n, m) in v.monitors.iter().enumerate() {
-                                ui.selectable_value(&mut pick, n, format!("{} ({}×{})", m.name, m.w, m.h));
-                            }
-                        });
-                        if pick != v.current {
-                            v.session.send(Ask::Monitor(pick));
-                        }
-                    }
-                    let mut q = v.quality;
-                    egui::ComboBox::from_id_salt("quality").selected_text(quality_name(q)).show_ui(ui, |ui| {
-                        for x in [Quality::Balanced, Quality::Sharp, Quality::Smooth] {
-                            ui.selectable_value(&mut q, x, quality_name(x));
-                        }
-                    });
-                    if q != v.quality {
-                        v.quality = q;
-                        v.session.send(Ask::Quality(q));
-                    }
-                    if ui.selectable_label(v.sound, "Sound").clicked() {
-                        v.sound = !v.sound;
-                        v.session.send(Ask::Sound(v.sound));
-                    }
-                    if ui.selectable_label(v.actual_size, "Actual size").clicked() {
-                        v.actual_size = !v.actual_size;
-                    }
-                    if ui.button("Full screen").on_hover_text("F11 to leave").clicked() {
-                        v.fullscreen = true;
-                        ui.ctx().send_viewport_cmd(ViewportCommand::Fullscreen(true));
-                    }
-                    let files = ui.selectable_label(v.panel == Panel::Files, "Files").on_hover_text("Needs control");
-                    if files.clicked() {
-                        v.panel = if v.panel == Panel::Files { Panel::None } else { Panel::Files };
-                        if v.panel == Panel::Files && v.listing.is_none() {
-                            v.session.cmd(Cmd::List(String::new()));
-                        }
-                    }
-                    let chat = if v.chat.unread > 0 { format!("Chat ({})", v.chat.unread) } else { "Chat".into() };
-                    if ui.selectable_label(v.panel == Panel::Chat, chat).clicked() {
-                        v.panel = if v.panel == Panel::Chat { Panel::None } else { Panel::Chat };
-                    }
-                    hang_up = ui.button("Disconnect").clicked();
-                });
-                for n in &v.notes {
-                    ui.label(RichText::new(n).weak().small());
-                }
-            });
+            toolbar(ui, v, &mut hang_up);
         }
         if v.fullscreen && ui.input(|i| i.key_pressed(Key::F11)) {
             v.fullscreen = false;
             ui.ctx().send_viewport_cmd(ViewportCommand::Fullscreen(false));
         }
 
+        let side = egui::Frame::new().fill(GROUND).inner_margin(egui::Margin::same(16)).stroke(egui::Stroke::new(1.0, HAIRLINE));
         match v.panel {
             Panel::Files => {
-                egui::Panel::right("files").default_size(300.0).show(ui, |ui| files_panel(ui, v, control, &picked));
+                egui::Panel::right("files").frame(side).default_size(320.0).show(ui, |ui| files_panel(ui, v, control, &picked));
             }
             Panel::Chat => {
                 v.chat.unread = 0;
-                egui::Panel::right("chat").default_size(280.0).show(ui, |ui| {
+                egui::Panel::right("chat").frame(side).default_size(300.0).show(ui, |ui| {
                     if let Some(text) = chat_panel(ui, &mut v.chat) {
                         v.session.send(Ask::Chat(text));
                     }
@@ -915,13 +820,13 @@ impl App {
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(Color32::BLACK)).show(ui, |ui| {
             if let Some(img) = v.session.frame.lock().unwrap().take() {
                 match v.tex.as_mut() {
-                    Some(t) => t.set(img, TextureOptions::LINEAR),
+                    Some(tex) => tex.set(img, TextureOptions::LINEAR),
                     None => v.tex = Some(ui.ctx().load_texture("screen", img, TextureOptions::LINEAR)),
                 }
             }
             let area = ui.available_rect_before_wrap();
             let Some(tex) = v.tex.clone() else {
-                ui.painter().text(area.center(), egui::Align2::CENTER_CENTER, "Waiting for the first picture…", egui::FontId::proportional(16.0), Color32::GRAY);
+                ui.painter().text(area.center(), egui::Align2::CENTER_CENTER, t("Waiting for the first picture…"), egui::FontId::proportional(look::SIZE), SOFT);
                 return;
             };
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
@@ -947,7 +852,11 @@ impl App {
                 }
             }
             if !v.status.is_empty() {
-                ui.painter().text(area.center_top() + egui::vec2(0.0, 24.0), egui::Align2::CENTER_TOP, &v.status, egui::FontId::proportional(18.0), Color32::YELLOW);
+                // Reconnecting: say so over the frozen picture, on a plate so it reads on anything.
+                let galley = ui.painter().layout_no_wrap(v.status.clone(), egui::FontId::proportional(look::SIZE), INK);
+                let plate = Rect::from_center_size(area.center_top() + vec2(0.0, 40.0), galley.size() + vec2(32.0, 16.0));
+                ui.painter().rect_filled(plate, 10.0, Color32::from_black_alpha(200));
+                ui.painter().galley(plate.center() - galley.size() / 2.0, galley, INK);
             }
         });
 
@@ -957,25 +866,30 @@ impl App {
         }
     }
 
+    /// While someone is in this computer: a red bar per person, always on top, with the way to
+    /// stop them one click away.
     fn banners(&mut self, ui: &mut egui::Ui) {
         let mut cmds = Vec::new();
         for s in &mut self.shares {
-            egui::Panel::top(Id::unique(("sharing", s.id))).frame(egui::Frame::NONE.fill(RED).inner_margin(8.0)).show(ui, |ui| {
+            let frame = egui::Frame::new().fill(RED).inner_margin(egui::Margin::symmetric(16, 8));
+            egui::Panel::top(Id::unique(("sharing", s.id))).frame(frame).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let what = if s.control { "sees and controls your screen" } else { "sees your screen" };
-                    ui.label(RichText::new(format!("{} {what}", s.who)).color(Color32::WHITE).strong());
+                    let what = if s.control { "{} sees and controls your screen" } else { "{} sees your screen" };
+                    ui.label(strong(tf(what, &[&s.who])).color(Color32::WHITE));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Stop sharing").clicked() {
+                        let stop = RichText::new(t("Stop sharing")).color(RED);
+                        if ui.add(egui::Button::new(stop).fill(Color32::WHITE).stroke(egui::Stroke::NONE)).clicked() {
                             cmds.push(HostCmd::Stop { id: s.id });
                         }
-                        if s.control && ui.button("Take back control").clicked() {
+                        let on_red = |text: String| egui::Button::new(RichText::new(text).color(Color32::WHITE)).fill(Color32::from_white_alpha(28)).stroke(egui::Stroke::NONE);
+                        if s.control && ui.add(on_red(t("Take back control"))).clicked() {
                             cmds.push(HostCmd::AllowControl { id: s.id, yes: false });
                         }
-                        if !s.control && !s.asking && ui.button("Give control").clicked() {
+                        if !s.control && !s.asking && ui.add(on_red(t("Give control"))).clicked() {
                             cmds.push(HostCmd::AllowControl { id: s.id, yes: true });
                         }
-                        let chat = if s.chat.unread > 0 { format!("Chat ({})", s.chat.unread) } else { "Chat".into() };
-                        if ui.button(chat).clicked() {
+                        let chat = if s.chat.unread > 0 { format!("{}  {}", t("Chat"), s.chat.unread) } else { t("Chat") };
+                        if ui.add(on_red(chat)).clicked() {
                             s.chat.open = !s.chat.open;
                             s.chat.unread = 0;
                         }
@@ -984,11 +898,15 @@ impl App {
             });
             if s.chat.open {
                 let mut open = true;
-                egui::Window::new(format!("Chat with {}", s.who)).id(Id::unique(("chat", s.id))).open(&mut open).default_size([320.0, 300.0]).show(ui.ctx(), |ui| {
-                    if let Some(text) = chat_panel(ui, &mut s.chat) {
-                        cmds.push(HostCmd::Chat { id: s.id, text });
-                    }
-                });
+                egui::Window::new(tf("Chat with {}", &[&s.who]))
+                    .id(Id::unique(("chat", s.id)))
+                    .open(&mut open)
+                    .default_size([320.0, 320.0])
+                    .show(ui.ctx(), |ui| {
+                        if let Some(text) = chat_panel(ui, &mut s.chat) {
+                            cmds.push(HostCmd::Chat { id: s.id, text });
+                        }
+                    });
                 s.chat.open = open;
             }
         }
@@ -1002,24 +920,25 @@ impl App {
         }
     }
 
+    /// The one question the person being helped has to answer, said plainly.
     fn prompts(&mut self, ctx: &egui::Context) {
         if let Some(r) = self.requests.first_mut() {
             let mut answer = None;
-            Modal::new(Id::unique(("request", r.req))).show(ctx, |ui| {
-                ui.set_max_width(380.0);
-                ui.heading("Someone wants to see your screen");
-                ui.add_space(8.0);
-                ui.label(RichText::new(&r.who).strong());
-                ui.label(RichText::new("Only accept if you know who this is.").weak());
-                ui.add_space(8.0);
-                ui.checkbox(&mut r.control, "Let them control (mouse, keyboard, clipboard, files)");
-                ui.checkbox(&mut r.trust, "Always allow them, even when I'm away");
+            Modal::new(Id::unique(("request", r.req))).frame(prompt_frame()).show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.label(strong(t("Someone wants to see your screen")));
                 ui.add_space(12.0);
+                ui.label(RichText::new(&r.who).size(20.0).color(INK));
+                ui.label(soft(t("Only accept if you know who this is.")));
+                ui.add_space(16.0);
+                ui.checkbox(&mut r.control, t("Let them control (mouse, keyboard, clipboard, files)"));
+                ui.checkbox(&mut r.trust, t("Always allow them, even when I'm away"));
+                ui.add_space(20.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Accept").clicked() {
+                    if primary(ui, t("Accept")).clicked() {
                         answer = Some(true);
                     }
-                    if ui.button("Decline").clicked() {
+                    if ui.button(t("Decline")).clicked() {
                         answer = Some(false);
                     }
                 });
@@ -1032,18 +951,18 @@ impl App {
 
         let Some(s) = self.shares.iter_mut().find(|s| s.asking) else { return };
         let mut answer = None;
-        Modal::new(Id::unique(("control", s.id))).show(ctx, |ui| {
-            ui.set_max_width(360.0);
-            ui.heading("Control request");
-            ui.add_space(8.0);
-            ui.label(format!("{} wants to control your mouse and keyboard.", s.who));
-            ui.label(RichText::new("You can take control back at any time from the red bar.").weak());
+        Modal::new(Id::unique(("control", s.id))).frame(prompt_frame()).show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.label(strong(t("Control request")));
             ui.add_space(12.0);
+            ui.label(RichText::new(tf("{} wants to control your mouse and keyboard.", &[&s.who])).color(INK));
+            ui.label(soft(t("You can take control back at any time from the red bar.")));
+            ui.add_space(20.0);
             ui.horizontal(|ui| {
-                if ui.button("Allow").clicked() {
+                if primary(ui, t("Allow")).clicked() {
                     answer = Some(true);
                 }
-                if ui.button("Deny").clicked() {
+                if ui.button(t("Deny")).clicked() {
                     answer = Some(false);
                 }
             });
@@ -1057,8 +976,8 @@ impl App {
     /// Tray clicks, updates, closing to the tray.
     fn housekeeping(&mut self, ctx: &egui::Context) {
         let mut msgs = Vec::new();
-        if let Some(t) = &self.tray {
-            while let Ok(m) = t.rx.try_recv() {
+        if let Some(tray) = &self.tray {
+            while let Ok(m) = tray.rx.try_recv() {
                 msgs.push(m);
             }
         }
@@ -1071,12 +990,12 @@ impl App {
                 }
             }
         }
-        if let Some(t) = self.tray.as_mut() {
+        if let Some(tray) = self.tray.as_mut() {
             let waiting = !self.requests.is_empty() || self.shares.iter().any(|s| s.asking);
-            t.alert(waiting);
-            t.tooltip(&match self.shares.len() {
+            tray.alert(waiting);
+            tray.tooltip(&match self.shares.len() {
                 0 => "Deskline".to_string(),
-                n => format!("Deskline: {n} watching"),
+                n => tf("Deskline: {} watching", &[&n.to_string()]),
             });
         }
         if let Some(u) = self.updater.as_mut() {
@@ -1090,7 +1009,7 @@ impl App {
                     }
                     update::Msg::Failed(e) => {
                         u.installing = false;
-                        self.note = format!("Update failed: {e}");
+                        self.note = tf("Update failed: {}", &[&e]);
                     }
                 }
             }
@@ -1113,19 +1032,138 @@ impl Viewing {
     }
 }
 
-fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::group(ui.style()).inner_margin(12.0).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.vertical(add);
+/// The session's bar: who, the link drawn as dusk with its kind and round trip, control, the
+/// session's tools, Disconnect at the end. A hairline under it.
+fn toolbar(ui: &mut egui::Ui, v: &mut Viewing, hang_up: &mut bool) {
+    let frame = egui::Frame::new().fill(GROUND).inner_margin(egui::Margin::symmetric(16, 8)).stroke(egui::Stroke::new(1.0, HAIRLINE));
+    egui::Panel::top("viewer").frame(frame).show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(strong(v.who.as_deref().unwrap_or("…")));
+            let (quality, text) = match v.link {
+                Some((kind, ms)) if v.status.is_empty() => (Some(look::link_quality(kind, ms)), format!("{}  {ms} ms", t(kind))),
+                _ => (None, v.status.clone()),
+            };
+            look::link(ui, quality).on_hover_text(&text);
+            ui.label(muted(text));
+            ui.add_space(8.0);
+            match v.control {
+                Control::Off => {
+                    if primary(ui, t("Ask for control")).clicked() {
+                        v.session.send(Ask::WantControl);
+                        v.control = Control::Asked;
+                    }
+                }
+                Control::Asked => {
+                    ui.label(soft(t("Waiting for them to allow control…")));
+                }
+                Control::On => {
+                    ui.label(RichText::new(t("You have control")).color(GREEN));
+                    if ui.button("Ctrl+Alt+Del").clicked() {
+                        v.session.send(Ask::Input(Input::CtrlAltDel));
+                    }
+                    if ui.selectable_label(v.privacy, t("Privacy")).on_hover_text(t("Blank their screen and lock their own mouse and keyboard")).clicked() {
+                        v.session.send(Ask::Privacy(!v.privacy));
+                    }
+                }
+            }
+            if v.monitors.len() > 1 {
+                let current = v.monitors.get(v.current).map_or(t("Screen"), |m| m.name.clone());
+                let mut pick = v.current;
+                egui::ComboBox::from_id_salt("monitor").selected_text(current).show_ui(ui, |ui| {
+                    for (n, m) in v.monitors.iter().enumerate() {
+                        ui.selectable_value(&mut pick, n, format!("{}  {}×{}", m.name, m.w, m.h));
+                    }
+                });
+                if pick != v.current {
+                    v.session.send(Ask::Monitor(pick));
+                }
+            }
+            let mut q = v.quality;
+            egui::ComboBox::from_id_salt("quality").selected_text(quality_name(q)).show_ui(ui, |ui| {
+                for x in [Quality::Balanced, Quality::Sharp, Quality::Smooth] {
+                    ui.selectable_value(&mut q, x, quality_name(x));
+                }
+            });
+            if q != v.quality {
+                v.quality = q;
+                v.session.send(Ask::Quality(q));
+            }
+            if ui.selectable_label(v.sound, t("Sound")).clicked() {
+                v.sound = !v.sound;
+                v.session.send(Ask::Sound(v.sound));
+            }
+            if ui.selectable_label(v.actual_size, t("Actual size")).clicked() {
+                v.actual_size = !v.actual_size;
+            }
+            if ui.button(t("Full screen")).on_hover_text(t("F11 to leave")).clicked() {
+                v.fullscreen = true;
+                ui.ctx().send_viewport_cmd(ViewportCommand::Fullscreen(true));
+            }
+            if ui.selectable_label(v.panel == Panel::Files, t("Files")).clicked() {
+                v.panel = if v.panel == Panel::Files { Panel::None } else { Panel::Files };
+                if v.panel == Panel::Files && v.listing.is_none() {
+                    v.session.cmd(Cmd::List(String::new()));
+                }
+            }
+            let chat = if v.chat.unread > 0 { format!("{}  {}", t("Chat"), v.chat.unread) } else { t("Chat") };
+            if ui.selectable_label(v.panel == Panel::Chat, chat).clicked() {
+                v.panel = if v.panel == Panel::Chat { Panel::None } else { Panel::Chat };
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                *hang_up = quiet(ui, t("Disconnect")).clicked();
+            });
+        });
+        for n in &v.notes {
+            ui.label(muted(n));
+        }
     });
 }
 
-fn quality_name(q: Quality) -> &'static str {
-    match q {
+/// A tab: ink with a hairline under it when it's the current one, soft otherwise.
+fn tab(ui: &mut egui::Ui, current: &mut Tab, this: Tab, label: String) {
+    let on = *current == this;
+    let text = if on { strong(label) } else { soft(label) };
+    let r = ui.add(egui::Label::new(text).sense(Sense::click()));
+    if on {
+        let y = r.rect.bottom() + 6.0;
+        ui.painter().hline(r.rect.x_range(), y, egui::Stroke::new(1.0, INK));
+    } else if r.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if r.clicked() {
+        *current = this;
+    }
+}
+
+/// luannzin.com's reading column: centred, left-aligned inside, scrolling as a whole.
+fn column(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+    ScrollArea::vertical().show(ui, |ui| {
+        let side = ((ui.available_width() - COLUMN) / 2.0).max(16.0);
+        ui.horizontal(|ui| {
+            ui.add_space(side);
+            ui.vertical(|ui| {
+                ui.set_max_width(COLUMN.min(ui.available_width() - 16.0));
+                add(ui);
+            });
+        });
+    });
+}
+
+/// A password field at the interface's height.
+fn secret(s: &mut String, hint: String) -> TextEdit<'_> {
+    TextEdit::singleline(s).password(true).hint_text(hint).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER)
+}
+
+fn prompt_frame() -> egui::Frame {
+    egui::Frame::new().fill(look::TILE).corner_radius(14).inner_margin(egui::Margin::same(24)).stroke(egui::Stroke::new(1.0, HAIRLINE))
+}
+
+fn quality_name(q: Quality) -> String {
+    t(match q {
         Quality::Balanced => "Balanced",
         Quality::Sharp => "Sharp text",
         Quality::Smooth => "Slow connection",
-    }
+    })
 }
 
 /// Open a file with whatever this system opens it with.
@@ -1143,11 +1181,12 @@ fn open(path: &std::path::Path) {
 /// Messages and a line to type. Returns a line to send.
 fn chat_panel(ui: &mut egui::Ui, chat: &mut Chat) -> Option<String> {
     let mut sent = None;
-    egui::Panel::bottom(ui.scope_id().with("draft")).show(ui, |ui| {
+    egui::Panel::bottom(ui.scope_id().with("draft")).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 8))).show(ui, |ui| {
         ui.horizontal(|ui| {
-            let r = ui.add(TextEdit::singleline(&mut chat.draft).hint_text("Message").desired_width(ui.available_width() - 60.0));
+            let field = TextEdit::singleline(&mut chat.draft).hint_text(t("Message")).desired_width(ui.available_width() - 72.0);
+            let r = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-            if (ui.button("Send").clicked() || enter) && !chat.draft.trim().is_empty() {
+            if (primary(ui, t("Send")).clicked() || enter) && !chat.draft.trim().is_empty() {
                 let text = std::mem::take(&mut chat.draft);
                 chat.lines.push((true, text.clone()));
                 sent = Some(text);
@@ -1157,10 +1196,9 @@ fn chat_panel(ui: &mut egui::Ui, chat: &mut Chat) -> Option<String> {
     });
     ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
         for (mine, text) in &chat.lines {
-            let who = if *mine { "You" } else { "Them" };
-            ui.label(RichText::new(who).strong().small());
-            ui.label(text);
-            ui.add_space(4.0);
+            ui.label(muted(if *mine { t("You") } else { t("Them") }).size(13.0));
+            ui.label(RichText::new(text).color(INK));
+            ui.add_space(8.0);
         }
     });
     sent
@@ -1169,14 +1207,14 @@ fn chat_panel(ui: &mut egui::Ui, chat: &mut Chat) -> Option<String> {
 /// Their folders, and sending yours.
 fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc::UnboundedSender<(u64, PathBuf)>) {
     if !control {
-        ui.label("File transfer needs control. Ask for control first.");
+        ui.label(soft(t("File transfer needs control. Ask for control first.")));
         return;
     }
     let id = v.session.id;
     ui.horizontal(|ui| {
         for folders in [false, true] {
-            let label = if folders { "Send a folder…" } else { "Send files…" };
-            if ui.button(label).on_hover_text("Lands in their Downloads. You can also drop files on the window.").clicked() {
+            let label = if folders { t("Send a folder…") } else { t("Send files…") };
+            if ui.button(label).on_hover_text(t("Lands in their Downloads. You can also drop files on the window.")).clicked() {
                 let tx = picked.clone();
                 tokio::spawn(async move {
                     let dialog = rfd::AsyncFileDialog::new();
@@ -1193,34 +1231,40 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
         }
     });
     for (name, done, total) in &v.transfers {
-        ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(name.as_str()));
+        ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(name.as_str()).fill(look::DUSK[2]));
     }
-    ui.separator();
+    ui.add_space(8.0);
+    look::hairline(ui);
+    ui.add_space(8.0);
     let Some(listing) = v.listing.clone() else {
-        ui.spinner();
+        look::waiting(ui, ui.available_width());
         return;
     };
     ui.horizontal(|ui| {
-        if ui.add_enabled(!listing.path.is_empty(), egui::Button::new("Up").small()).clicked() {
+        if ui.add_enabled(!listing.path.is_empty(), egui::Button::new(soft(t("Up"))).frame_when_inactive(false)).clicked() {
             v.session.cmd(Cmd::List(listing.parent.clone().unwrap_or_default()));
         }
-        ui.label(RichText::new(if listing.path.is_empty() { "Their computer" } else { &listing.path }).strong());
+        let here = if listing.path.is_empty() { t("Their computer") } else { listing.path.clone() };
+        ui.label(strong(here));
     });
     ScrollArea::vertical().show(ui, |ui| {
         for e in &listing.entries {
-            ui.horizontal(|ui| {
-                let path = listing.path_of(e);
-                if e.dir {
-                    if ui.link(format!("{}/", e.name)).clicked() {
-                        v.session.cmd(Cmd::List(path.clone()));
+            let path = listing.path_of(e);
+            look::row(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if e.dir {
+                        if ui.add(egui::Label::new(RichText::new(format!("{}/", e.name)).color(INK)).sense(Sense::click())).clicked() {
+                            v.session.cmd(Cmd::List(path.clone()));
+                        }
+                    } else {
+                        ui.label(RichText::new(&e.name).color(INK));
+                        ui.label(muted(size(e.size)).size(13.0));
                     }
-                } else {
-                    ui.label(format!("{}  {}", e.name, size(e.size)));
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("Download").on_hover_text("Into your Downloads").clicked() {
-                        v.session.cmd(Cmd::Download(path));
-                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if quiet(ui, t("Download")).on_hover_text(t("Into your Downloads")).clicked() {
+                            v.session.cmd(Cmd::Download(path.clone()));
+                        }
+                    });
                 });
             });
         }

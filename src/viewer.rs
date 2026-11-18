@@ -24,8 +24,8 @@ pub enum ViewEvent {
     Viewing { who: String, control: bool },
     Control(bool),
     Monitors { list: Vec<Monitor>, current: usize },
-    /// "LAN 3 ms".
-    Link(String),
+    /// The path in use ("LAN", "Direct", "Relay") and its round trip in ms.
+    Link { kind: &'static str, ms: u32 },
     Chat(String),
     Note(String),
     Privacy(bool),
@@ -311,7 +311,10 @@ async fn session(
             Some(text) = clip::changed(&mut clipboard) => {
                 let _ = send_msg(&mut send, &Ask::Clip(text)).await;
             }
-            _ = tick.tick() => out.send(id, ViewEvent::Link(net::link(&conn))),
+            _ = tick.tick() => {
+                let (kind, ms) = net::link(&conn);
+                out.send(id, ViewEvent::Link { kind, ms });
+            }
             Some(_) = transfers.join_next() => {}
         }
     };
@@ -397,7 +400,7 @@ async fn upload(conn: Connection, path: PathBuf, out: Out, id: u64) {
     let name = file_name(&path);
     let report = progress(out.clone(), id, name.clone());
     let text = match files::upload(&conn, &path, &report).await {
-        Ok(at) => format!("Sent {name} to {at}"),
+        Ok(at) => format!("Sent to {at}"),
         Err(e) => format!("Couldn't send {name}: {e}"),
     };
     out.send(id, ViewEvent::Note(text));

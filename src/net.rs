@@ -68,16 +68,16 @@ pub fn rtt(conn: &Connection) -> Duration {
     conn.paths().iter().find(|p| p.is_selected()).map_or(Duration::from_millis(100), |p| p.rtt())
 }
 
-/// "LAN 3 ms", "Direct 41 ms" or "Relay 120 ms".
-pub fn link(conn: &Connection) -> String {
+/// The path in use: "LAN", "Direct" or "Relay", and its round trip in ms.
+pub fn link(conn: &Connection) -> (&'static str, u32) {
     let paths = conn.paths();
-    let Some(p) = paths.iter().find(|p| p.is_selected()) else { return "Relay".into() };
+    let Some(p) = paths.iter().find(|p| p.is_selected()) else { return ("Relay", 0) };
     let kind = match p.remote_addr() {
         TransportAddr::Ip(a) if is_lan(a.ip()) => "LAN",
         TransportAddr::Ip(_) => "Direct",
         _ => "Relay",
     };
-    format!("{kind} {} ms", p.rtt().as_millis())
+    (kind, p.rtt().as_millis().min(u32::MAX as u128) as u32)
 }
 
 fn is_lan(ip: IpAddr) -> bool {
