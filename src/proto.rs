@@ -7,17 +7,17 @@
 //!
 //! Messages are postcard, each prefixed with its length. A message that doesn't decode is
 //! skipped, so a newer version can add `Ask`/`Tell` variants at the END and older versions
-//! still talk to it. `Hello` must never change shape.
-use iroh::endpoint::{RecvStream, SendStream};
+//! still talk to it. `Hello` must never change shape. The same framing carries file transfers
+//! and the Windows service's pipe.
+use iroh::endpoint::RecvStream;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::codec::Quality;
 use crate::desktop::{Input, Monitor};
 
 pub const ALPN: &[u8] = b"deskline/2";
-/// What 0.1 spoke. Answered only to say "update".
-pub const ALPN_V1: &[u8] = b"deskline/1";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Close code: the host ended the session on purpose, so the viewer shouldn't reconnect.
 pub const STOPPED: u32 = 1;
@@ -75,14 +75,14 @@ pub struct Packet {
     pub data: Vec<u8>,
 }
 
-pub async fn send_msg<T: Serialize>(w: &mut SendStream, m: &T) -> anyhow::Result<()> {
+pub async fn send_msg<T: Serialize, W: AsyncWrite + Unpin>(w: &mut W, m: &T) -> anyhow::Result<()> {
     let bytes = postcard::to_stdvec(m)?;
     w.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
     w.write_all(&bytes).await?;
     Ok(())
 }
 
-async fn recv_raw(r: &mut RecvStream) -> anyhow::Result<Vec<u8>> {
+async fn recv_raw<R: AsyncRead + Unpin>(r: &mut R) -> anyhow::Result<Vec<u8>> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await?;
     let n = u32::from_le_bytes(len) as usize;
@@ -92,7 +92,7 @@ async fn recv_raw(r: &mut RecvStream) -> anyhow::Result<Vec<u8>> {
     Ok(buf)
 }
 
-pub async fn recv_msg<T: DeserializeOwned>(r: &mut RecvStream) -> anyhow::Result<T> {
+pub async fn recv_msg<T: DeserializeOwned, R: AsyncRead + Unpin>(r: &mut R) -> anyhow::Result<T> {
     Ok(postcard::from_bytes(&recv_raw(r).await?)?)
 }
 
@@ -109,25 +109,6 @@ pub fn reader<T: DeserializeOwned + Send + 'static>(mut r: RecvStream) -> mpsc::
         }
     });
     rx
-}
-
-/// Tell a 0.1 viewer to update, in its own words.
-pub async fn refuse_v1(mut send: SendStream, mut recv: RecvStream) -> anyhow::Result<()> {
-    #[derive(Deserialize)]
-    enum OldAsk {
-        Hello { #[allow(dead_code)] version: String, #[allow(dead_code)] name: String },
-    }
-    #[derive(Serialize)]
-    enum OldTell {
-        #[allow(dead_code)]
-        Accepted { name: String },
-        Denied(String),
-    }
-    let _: OldAsk = recv_msg(&mut recv).await?;
-    let why = format!("They run Deskline {VERSION}. Update yours to connect.");
-    send_msg(&mut send, &OldTell::Denied(why)).await?;
-    send.finish()?;
-    Ok(())
 }
 
 /// Names come from the other side: keep them short and printable.

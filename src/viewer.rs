@@ -212,7 +212,7 @@ async fn session(
     if !resume {
         out.send(id, ViewEvent::Status("Waiting for them to accept…".into()));
     }
-    let reply = match until_bye(rx, recv_msg::<Tell>(&mut recv)).await {
+    let reply = match until_bye(rx, recv_msg::<Tell, _>(&mut recv)).await {
         None => {
             conn.close(0u8.into(), b"bye");
             return Outcome::Done(String::new());
@@ -285,7 +285,7 @@ async fn session(
                 }
                 Some(Tell::Monitors { list, current }) => out.send(id, ViewEvent::Monitors { list, current }),
                 Some(Tell::Clip(text)) => {
-                    if let Some((c, _)) = &clipboard {
+                    if let Some(c) = &clipboard {
                         c.set(text);
                     }
                 }
@@ -308,7 +308,7 @@ async fn session(
                     };
                 }
             },
-            Some(text) = next_clip(&mut clipboard) => {
+            Some(text) = clip::changed(&mut clipboard) => {
                 let _ = send_msg(&mut send, &Ask::Clip(text)).await;
             }
             _ = tick.tick() => out.send(id, ViewEvent::Link(net::link(&conn))),
@@ -327,13 +327,6 @@ fn connect_error(e: &str) -> String {
         "That computer runs an older Deskline. Ask them to update it.".into()
     } else {
         format!("Couldn't reach that computer: {e}")
-    }
-}
-
-async fn next_clip(c: &mut Option<(clip::Clipboard, mpsc::UnboundedReceiver<String>)>) -> Option<String> {
-    match c {
-        Some((_, rx)) => rx.recv().await,
-        None => std::future::pending().await,
     }
 }
 

@@ -9,7 +9,7 @@ use iroh::endpoint::{Connection, QuicTransportConfig, presets};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, TransportAddr};
 use iroh_mdns_address_lookup::MdnsAddressLookup;
 
-use crate::proto::{ALPN, ALPN_V1};
+use crate::proto::ALPN;
 
 /// Bind the endpoint with the identity saved in `home`. `relay`: your own relay server's URL
 /// instead of n0's public ones.
@@ -18,7 +18,7 @@ pub async fn start(home: &Path, relay: Option<&str>) -> anyhow::Result<Endpoint>
     let transport = QuicTransportConfig::builder().max_idle_timeout(Some(Duration::from_secs(12).try_into()?)).build();
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(identity(home)?)
-        .alpns(vec![ALPN.to_vec(), ALPN_V1.to_vec()])
+        .alpns(vec![ALPN.to_vec()])
         .transport_config(transport);
     if let Some(url) = relay.map(str::trim).filter(|u| !u.is_empty()) {
         let url = url.parse().map_err(|e| anyhow::anyhow!("relay server address {url:?}: {e}"))?;

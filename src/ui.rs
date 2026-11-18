@@ -697,12 +697,8 @@ impl App {
         if self.service {
             ui.label(RichText::new("Session log: %ProgramData%\\Deskline\\sessions.log (administrators)").weak());
         } else if ui.button("Open session log").clicked() {
-            open(&self.store_dir().join("sessions.log"));
+            open(&self.store.dir().join("sessions.log"));
         }
-    }
-
-    fn store_dir(&self) -> PathBuf {
-        self.store.dir()
     }
 
     fn connecting(&mut self, ui: &mut egui::Ui, i: usize) {

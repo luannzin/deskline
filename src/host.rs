@@ -16,7 +16,7 @@ use tokio::time::{Instant, timeout};
 
 use crate::codec::{self, Quality};
 use crate::desktop::{Frame, Screen};
-use crate::proto::{self, ALPN_V1, Ask, Hello, Packet, STOPPED, Tell, recv_msg, send_msg};
+use crate::proto::{self, Ask, Hello, Packet, STOPPED, Tell, recv_msg, send_msg};
 use crate::settings::{self, Peer, Store};
 use crate::{audio, clip, files, net};
 
@@ -214,11 +214,6 @@ impl Host {
 
     async fn serve(self: Arc<Self>, conn: Connection) -> anyhow::Result<()> {
         let (mut send, mut recv) = conn.accept_bi().await?;
-        if conn.alpn() == ALPN_V1 {
-            let _ = proto::refuse_v1(send, recv).await;
-            let _ = timeout(Duration::from_secs(3), conn.closed()).await;
-            return Ok(());
-        }
         let hello: Hello = recv_msg(&mut recv).await?;
         let peer = conn.remote_id();
         let who = format!("{} ({})", proto::clean(&hello.name), net::short(peer));
@@ -462,7 +457,7 @@ impl Host {
                         send_msg(send, &Tell::Monitors { list, current }).await?;
                     }
                     Some(Ask::Clip(text)) if *control => {
-                        if let Some((c, _)) = &clipboard {
+                        if let Some(c) = &clipboard {
                             c.set(text);
                         }
                     }
@@ -497,7 +492,7 @@ impl Host {
                         Some(_) => End::Lost("Connection lost.".into()),
                     },
                 },
-                Some(text) = next(&mut clipboard) => send_msg(send, &Tell::Clip(text)).await?,
+                Some(text) = clip::changed(&mut clipboard) => send_msg(send, &Tell::Clip(text)).await?,
                 Some(packet) = next_sound(&mut sound) => {
                     // Too big or the link is full: that bit of sound is gone, which is fine.
                     let _ = conn.send_datagram(packet.into());
@@ -563,13 +558,6 @@ enum End {
     Stopped(String),
     /// The link died; the viewer may come back within `GRACE`.
     Lost(String),
-}
-
-async fn next(c: &mut Option<(clip::Clipboard, mpsc::UnboundedReceiver<String>)>) -> Option<String> {
-    match c {
-        Some((_, rx)) => rx.recv().await,
-        None => std::future::pending().await,
-    }
 }
 
 async fn next_sound(s: &mut Option<(audio::Capture, mpsc::Receiver<Vec<u8>>)>) -> Option<Vec<u8>> {

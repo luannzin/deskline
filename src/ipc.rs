@@ -4,8 +4,7 @@
 //! takes changes to who gets in without a click only from an elevated window.
 use std::os::windows::io::AsRawHandle;
 
-use serde::{Serialize, de::DeserializeOwned};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, ServerOptions};
 use tokio::sync::{mpsc, watch};
 use windows::Win32::Foundation::{HANDLE, HLOCAL, LocalFree};
@@ -15,6 +14,7 @@ use windows::Win32::System::Pipes::{GetNamedPipeClientProcessId, GetNamedPipeSer
 use windows::core::w;
 
 use crate::host::{HostCmd, HostEvent};
+use crate::proto::{recv_msg, send_msg};
 use crate::service;
 
 fn pipe_name() -> String {
@@ -57,7 +57,7 @@ pub fn serve(mut events: mpsc::UnboundedReceiver<HostEvent>, cmds: mpsc::Unbound
             let (mut r, mut w) = tokio::io::split(server);
             let to_host = cmds.clone();
             let mut reader = tokio::spawn(async move {
-                while let Ok(c) = read::<HostCmd, _>(&mut r).await {
+                while let Ok(c) = recv_msg::<HostCmd, _>(&mut r).await {
                     if c.is_admin() && !elevated {
                         continue;
                     }
@@ -69,7 +69,7 @@ pub fn serve(mut events: mpsc::UnboundedReceiver<HostEvent>, cmds: mpsc::Unbound
             loop {
                 tokio::select! {
                     e = events.recv() => match e {
-                        Some(e) => if write(&mut w, &e).await.is_err() { break },
+                        Some(e) => if send_msg(&mut w, &e).await.is_err() { break },
                         None => return,
                     },
                     _ = &mut reader => break,
@@ -130,17 +130,17 @@ pub async fn connect() -> anyhow::Result<(mpsc::UnboundedSender<HostCmd>, mpsc::
             let events = ev_tx.clone();
             // Reading on its own task: a read must never be cancelled halfway through a message.
             let mut reader = tokio::spawn(async move {
-                while let Ok(e) = read::<HostEvent, _>(&mut r).await {
+                while let Ok(e) = recv_msg::<HostEvent, _>(&mut r).await {
                     if events.send(e).is_err() {
                         break;
                     }
                 }
             });
-            if write(&mut w, &HostCmd::Hello).await.is_ok() {
+            if send_msg(&mut w, &HostCmd::Hello).await.is_ok() {
                 loop {
                     tokio::select! {
                         c = cmd_rx.recv() => match c {
-                            Some(c) => if write(&mut w, &c).await.is_err() { break },
+                            Some(c) => if send_msg(&mut w, &c).await.is_err() { break },
                             None => return,
                         },
                         _ = &mut reader => break,
@@ -153,19 +153,3 @@ pub async fn connect() -> anyhow::Result<(mpsc::UnboundedSender<HostCmd>, mpsc::
     Ok((cmd_tx, ev_rx))
 }
 
-async fn write<T: Serialize, W: AsyncWrite + Unpin>(w: &mut W, m: &T) -> anyhow::Result<()> {
-    let bytes = postcard::to_stdvec(m)?;
-    w.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
-    w.write_all(&bytes).await?;
-    Ok(())
-}
-
-async fn read<T: DeserializeOwned, R: AsyncRead + Unpin>(r: &mut R) -> anyhow::Result<T> {
-    let mut len = [0u8; 4];
-    r.read_exact(&mut len).await?;
-    let n = u32::from_le_bytes(len) as usize;
-    anyhow::ensure!(n <= 1 << 20, "message too large");
-    let mut buf = vec![0; n];
-    r.read_exact(&mut buf).await?;
-    Ok(postcard::from_bytes(&buf)?)
-}
