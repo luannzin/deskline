@@ -46,6 +46,28 @@ windows = { version = "0.62", features = [
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
+# macOS: CoreGraphics display streams for the frames and CGEvent for input. The same versions
+# eframe already pulls in, so nothing new gets downloaded.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "objc2",
+    "objc2-io-surface",
+    "CGDirectDisplay",
+    "CGDisplayStream",
+    "CGError",
+    "CGEvent",
+    "CGEventTypes",
+    "CGRemoteOperation",
+    "CGWindow",
+] }
+objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "objc2", "IOSurfaceRef", "IOSurfaceTypes", "libc"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
