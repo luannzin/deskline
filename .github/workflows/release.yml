@@ -132,6 +132,7 @@ jobs:
             dist/*.deb
             dist/*.exe
             dist/*.dmg
+            dist/deskline-linux-x86_64
           if-no-files-found: error
 
   release:
