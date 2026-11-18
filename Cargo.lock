@@ -955,6 +955,7 @@ dependencies = [
  "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "windows",
+ "windows-registry",
  "x11rb",
 ]
 
