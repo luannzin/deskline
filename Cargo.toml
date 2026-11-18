@@ -10,6 +10,8 @@ description = "Remote desktop with no server: share a code, accept, see and cont
 anyhow = "1"
 # glow (OpenGL) instead of wgpu: smaller binary, faster build, runs on old GPUs and VMs.
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
+# Tray icons are pngs in assets/.
+image = { version = "0.25", default-features = false, features = ["png"] }
 iroh = "1.4"
 iroh-mdns-address-lookup = "0.6"
 # Builds Cisco's OpenH264 from source into the binary: nothing to install next to the app.
@@ -17,6 +19,10 @@ openh264 = "0.9"
 postcard = { version = "1", features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# Linux uses the pure-Rust StatusNotifierItem backend: no GTK to install or link.
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+# Update checks and downloads from GitHub Releases; rustls so no OS TLS library is needed.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 
 # Linux: the xdg RemoteDesktop portal (Wayland and X11 desktops that ship it) and PipeWire for
 # the frames. Building needs libpipewire-0.3-dev and libclang-dev.
@@ -34,6 +40,12 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
+# Start at sign-in (HKCU Run key).
+windows-registry = "0.6"
+
+# Icon and version info in the .exe (build.rs).
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }
 
 [profile.release]
 lto = "thin"

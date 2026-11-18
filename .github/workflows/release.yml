@@ -1,0 +1,151 @@
+name: release
+
+# Every push to main whose Cargo.toml version has no release yet builds deskline.exe (Windows: runs
+# portable and installs itself), deskline_amd64.deb (Ubuntu 22.04+) and Deskline.dmg (macOS 11+) and
+# publishes them as release v<version>; running copies then update themselves to it. To ship: bump
+# `version` in Cargo.toml and push. "Run workflow" on the Actions tab builds the same files without
+# publishing.
+#
+# Optional signing: each step runs only when its secrets are set (Settings > Secrets and variables >
+# Actions); without them the builds are unsigned (Windows SmartScreen warns, macOS needs "Open Anyway").
+#   WINDOWS_CERT_PFX       code signing certificate (.pfx), base64: base64 -w0 cert.pfx
+#   WINDOWS_CERT_PASSWORD  its password
+#   APPLE_CERT_P12         "Developer ID Application" certificate with its key (.p12), base64
+#   APPLE_CERT_PASSWORD    its password
+#   APPLE_ID               the Apple ID that notarizes
+#   APPLE_TEAM_ID          its 10-character team ID
+#   APPLE_APP_PASSWORD     an app-specific password for that Apple ID (appleid.apple.com)
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: release
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      new: ${{ steps.v.outputs.new }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: version
+    if: needs.version.outputs.new == 'true' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-22.04 = oldest glibc and PipeWire we support, so the .deb runs on 22.04 and newer.
+        os: [ubuntu-22.04, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    env:
+      # only whether they're set: the secrets themselves go to the signing steps alone
+      SIGN_WINDOWS: ${{ secrets.WINDOWS_CERT_PFX != '' }}
+      SIGN_MACOS: ${{ secrets.APPLE_CERT_P12 != '' && secrets.APPLE_ID != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Linux (tests, .deb)
+        if: runner.os == 'Linux'
+        run: |
+          tools/install-linux-deps.sh
+          cargo test --release
+          tools/build-deb.sh
+
+      - name: nasm (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+      - name: Windows (deskline.exe)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: tools/build-windows.sh
+      - name: Sign deskline.exe
+        if: runner.os == 'Windows' && env.SIGN_WINDOWS == 'true'
+        shell: pwsh
+        env:
+          CERT: ${{ secrets.WINDOWS_CERT_PFX }}
+          PASS: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = "$env:RUNNER_TEMP\cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName | Select-Object -Last 1
+          & $signtool.FullName sign /f $pfx /p $env:PASS /fd sha256 /tr http://timestamp.digicert.com /td sha256 dist\deskline.exe
+          $code = $LASTEXITCODE
+          Remove-Item $pfx
+          exit $code
+
+      - name: macOS signing certificate
+        if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
+        env:
+          CERT: ${{ secrets.APPLE_CERT_P12 }}
+          PASS: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/sign.keychain-db"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p ci "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p ci "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "SIGN_IDENTITY=Developer ID Application" >> "$GITHUB_ENV"
+      - name: macOS (universal .app in a .dmg)
+        if: runner.os == 'macOS'
+        run: |
+          brew install nasm
+          tools/build-macos.sh
+      - name: Notarize Deskline.dmg
+        if: runner.os == 'macOS' && env.SIGN_MACOS == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool submit dist/Deskline.dmg --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple dist/Deskline.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deskline-${{ runner.os }}
+          path: |
+            dist/*.deb
+            dist/*.exe
+            dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    if: github.event_name == 'push' && needs.version.outputs.new == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        # the asset names are what the in-app updater downloads (src/update.rs ASSET)
+        run: |
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "Deskline $TAG" --generate-notes
