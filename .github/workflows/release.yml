@@ -52,7 +52,7 @@ jobs:
       fail-fast: false
       matrix:
         # ubuntu-22.04 = oldest glibc and PipeWire we support, so the .deb runs on 22.04 and newer.
-        os: [ubuntu-22.04, windows-latest, macos-14]
+        os: [ubuntu-22.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     env:
       # only whether they're set: the secrets themselves go to the signing steps alone
