@@ -479,6 +479,7 @@ impl App {
                 ui.label(muted(state));
                 if quiet(ui, t("Change")).clicked() {
                     self.tab = Tab::Settings;
+                    self.note.clear();
                 }
             });
 
@@ -486,12 +487,12 @@ impl App {
             ui.label(strong(t("Connect to a computer")));
             ui.add_space(4.0);
             let mut go = false;
-            // Button first from the right, so the field takes whatever width the words leave.
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.horizontal(|ui| {
                 let ready = !self.partner.trim().is_empty();
-                let clicked = primary_enabled(ui, ready, t("Connect")).clicked();
-                let field = TextEdit::singleline(&mut self.partner).hint_text(t("Paste their code")).desired_width(ui.available_width());
+                let label = t("Connect");
+                let field = TextEdit::singleline(&mut self.partner).hint_text(t("Paste their code")).desired_width(look::beside(ui, &label));
                 let field = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+                let clicked = primary_enabled(ui, ready, label).clicked();
                 go = (clicked || (field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && ready;
             });
             if self.need_password {
@@ -740,11 +741,11 @@ impl App {
         ui.label(soft(t(
             "Leave empty for the public relays. Your own: run iroh-relay and paste its URL. Restart Deskline after changing.",
         )));
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let save = ui.button(t("Save")).clicked();
-            let field = TextEdit::singleline(&mut self.form.relay).hint_text("https://relay.example.com").desired_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let label = t("Save");
+            let field = TextEdit::singleline(&mut self.form.relay).hint_text("https://relay.example.com").desired_width(look::beside(ui, &label));
             ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
-            if save {
+            if ui.button(label).clicked() {
                 let relay = Some(self.form.relay.trim().to_string()).filter(|r| !r.is_empty());
                 let _ = self.store.update(|s| s.relay = relay);
                 self.note = t("Saved. Restart Deskline to use it.");
@@ -883,8 +884,7 @@ impl App {
     }
 
     /// While someone is in this computer: a red bar per person at the top of the window, with
-    /// the way to stop them one click away; and while the window isn't in front, the same bar in
-    /// a small window above every other one, so it's never behind what the helper opened.
+    /// the way to stop them one click away (and `float_bar` when the window isn't in front).
     fn banners(&mut self, ui: &mut egui::Ui) {
         let mut cmds = Vec::new();
         for s in &mut self.shares {
@@ -927,38 +927,6 @@ impl App {
                 s.chat.open = open;
             }
         }
-        if !self.shares.is_empty() && !self.hidden && !ui.ctx().input(|i| i.focused) {
-            let who = self.shares.iter().map(|s| s.who.as_str()).collect::<Vec<_>>().join(", ");
-            let what = if self.shares.iter().any(|s| s.control) { "{} sees and controls your screen" } else { "{} sees your screen" };
-            let line = tf(what, &[&who]);
-            let monitor = ui.ctx().input(|i| i.viewport().monitor_size).unwrap_or(vec2(1280.0, 800.0));
-            let size = vec2(560.0, 48.0);
-            let bar = egui::ViewportBuilder::default()
-                .with_title("Deskline")
-                .with_always_on_top()
-                .with_decorations(false)
-                .with_resizable(false)
-                .with_taskbar(false)
-                .with_inner_size(size)
-                .with_position(Pos2::new(((monitor.x - size.x) / 2.0).max(0.0), 12.0));
-            let stop = ui.ctx().show_viewport_immediate(egui::ViewportId::from_hash_of("sharing-bar"), bar, |ui, _| {
-                let mut stop = false;
-                let frame = egui::Frame::new().fill(RED).inner_margin(egui::Margin::symmetric(16, 8));
-                egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(strong(line.clone()).color(Color32::WHITE));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let label = RichText::new(t("Stop sharing")).color(RED);
-                            stop = ui.add(egui::Button::new(label).fill(Color32::WHITE).stroke(egui::Stroke::NONE)).clicked();
-                        });
-                    });
-                });
-                stop
-            });
-            if stop {
-                cmds.extend(self.shares.iter().map(|s| HostCmd::Stop { id: s.id }));
-            }
-        }
         for c in cmds {
             if let HostCmd::AllowControl { id, yes: false } = c {
                 if let Some(s) = self.shares.iter_mut().find(|s| s.id == id) {
@@ -966,6 +934,48 @@ impl App {
                 }
             }
             let _ = self.host.send(c);
+        }
+    }
+
+    /// While someone is in this computer and the window isn't in front (behind other windows, or
+    /// minimized), the red bar also stands alone above every other window. Called from `logic`,
+    /// which runs while the window is minimized; `ui` doesn't.
+    fn float_bar(&mut self, ctx: &egui::Context) {
+        let (focused, minimized) = ctx.input(|i| (i.focused, i.viewport().minimized == Some(true)));
+        if self.shares.is_empty() || self.hidden || (focused && !minimized) {
+            return;
+        }
+        let who = self.shares.iter().map(|s| s.who.as_str()).collect::<Vec<_>>().join(", ");
+        let what = if self.shares.iter().any(|s| s.control) { "{} sees and controls your screen" } else { "{} sees your screen" };
+        let line = tf(what, &[&who]);
+        let monitor = ctx.input(|i| i.viewport().monitor_size).unwrap_or(vec2(1280.0, 800.0));
+        let size = vec2(560.0, 48.0);
+        let bar = egui::ViewportBuilder::default()
+            .with_title("Deskline")
+            .with_always_on_top()
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_inner_size(size)
+            .with_position(Pos2::new(((monitor.x - size.x) / 2.0).max(0.0), 12.0));
+        let stop = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("sharing-bar"), bar, |ui, _| {
+            let mut stop = false;
+            let frame = egui::Frame::new().fill(RED).inner_margin(egui::Margin::symmetric(16, 8));
+            egui::CentralPanel::default().frame(frame).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(strong(line.clone()).color(Color32::WHITE));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let label = RichText::new(t("Stop sharing")).color(RED);
+                        stop = ui.add(egui::Button::new(label).fill(Color32::WHITE).stroke(egui::Stroke::NONE)).clicked();
+                    });
+                });
+            });
+            stop
+        });
+        if stop {
+            for s in &self.shares {
+                let _ = self.host.send(HostCmd::Stop { id: s.id });
+            }
         }
     }
 
@@ -1232,10 +1242,11 @@ fn open(path: &std::path::Path) {
 fn chat_panel(ui: &mut egui::Ui, chat: &mut Chat) -> Option<String> {
     let mut sent = None;
     egui::Panel::bottom(ui.scope_id().with("draft")).frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(0, 8))).show(ui, |ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let clicked = primary(ui, t("Send")).clicked();
-            let field = TextEdit::singleline(&mut chat.draft).hint_text(t("Message")).desired_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let label = t("Send");
+            let field = TextEdit::singleline(&mut chat.draft).hint_text(t("Message")).desired_width(look::beside(ui, &label));
             let r = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+            let clicked = primary(ui, label).clicked();
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
             if (clicked || enter) && !chat.draft.trim().is_empty() {
                 let text = std::mem::take(&mut chat.draft);
@@ -1422,6 +1433,7 @@ impl eframe::App for App {
             }
         }
         self.housekeeping(ctx);
+        self.float_bar(ctx);
         if self.hidden {
             ctx.request_repaint_after(Duration::from_millis(500));
         }

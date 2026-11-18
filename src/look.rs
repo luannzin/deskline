@@ -138,15 +138,27 @@ pub fn row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> (Response, R) {
     (response, inner.inner)
 }
 
-/// A close mark drawn as two strokes (no glyph): muted, ink under the pointer.
+/// A close mark drawn as two strokes (no glyph) in a 24px target: muted, ink under the pointer
+/// or with keyboard focus, which also gets a ring.
 pub fn close(ui: &mut Ui) -> Response {
-    let (rect, response) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
-    let color = if response.hovered() { INK } else { MUTED };
-    let r = rect.shrink(4.5);
+    let (rect, response) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+    let lit = response.hovered() || response.has_focus();
+    let color = if lit { INK } else { MUTED };
+    if response.has_focus() {
+        ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, SOFT), egui::StrokeKind::Inside);
+    }
+    let r = Rect::from_center_size(rect.center(), vec2(7.0, 7.0));
     let stroke = Stroke::new(1.5, color);
     ui.painter().line_segment([r.left_top(), r.right_bottom()], stroke);
     ui.painter().line_segment([r.right_top(), r.left_bottom()], stroke);
     response
+}
+
+/// The width a field can take on a line that ends with a button labelled `label`.
+pub fn beside(ui: &Ui, label: &str) -> f32 {
+    let text = ui.painter().layout_no_wrap(label.to_string(), FontId::new(SIZE, FontFamily::Name(MEDIUM.into())), INK).size().x;
+    let s = ui.spacing();
+    (ui.available_width() - text - 2.0 * s.button_padding.x - s.item_spacing.x).max(80.0)
 }
 
 /// This computer's code, big enough to read over the phone, in a well: three even lines (the 13
