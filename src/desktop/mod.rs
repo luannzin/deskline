@@ -8,6 +8,7 @@ use tokio::sync::watch;
 
 #[cfg_attr(all(target_os = "linux", not(test)), path = "linux.rs")]
 #[cfg_attr(all(windows, not(test)), path = "windows.rs")]
+#[cfg_attr(all(target_os = "macos", not(test)), path = "macos.rs")]
 #[cfg_attr(test, path = "fake.rs")]
 pub(crate) mod imp;
 
@@ -20,16 +21,27 @@ pub struct Frame {
     pub px: Vec<u8>,
 }
 
+/// One screen the host can share.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Monitor {
+    pub name: String,
+    pub w: u32,
+    pub h: u32,
+    pub primary: bool,
+}
+
 /// Input from the viewer. Positions are 0..1 across the shared screen; keys are Linux evdev
-/// codes, which both backends understand.
+/// codes, which every backend translates.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum Input {
     Move { x: f32, y: f32 },
-    /// 0 left, 1 right, 2 middle.
+    /// 0 left, 1 right, 2 middle, 3 back, 4 forward.
     Button { button: u8, down: bool },
-    /// Wheel notches, positive is away from the user (scroll up).
-    Scroll { steps: i32 },
+    /// Wheel notches. `y` positive scrolls up (away from the user), `x` positive scrolls right.
+    Scroll { x: i32, y: i32 },
     Key { code: u16, down: bool },
+    /// The secure attention sequence: Windows' sign-in and lock screen answer only to this.
+    CtrlAltDel,
 }
 
 pub struct Screen {
@@ -40,10 +52,26 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// Start capturing. On Linux this shows the system's screen sharing dialog.
+    /// Start capturing the primary monitor. On Linux this may show the system's sharing dialog.
     pub async fn open(home: &Path) -> anyhow::Result<Self> {
         let (imp, frames) = imp::Screen::open(home).await?;
         Ok(Self { imp, held: Vec::new(), frames })
+    }
+
+    /// The screens that can be shared, in the order `select` takes them.
+    pub fn monitors(&self) -> Vec<Monitor> {
+        self.imp.monitors()
+    }
+
+    /// Which of `monitors()` is being shared.
+    pub fn current(&self) -> usize {
+        self.imp.current()
+    }
+
+    /// Share another monitor. Frames keep arriving on the same `frames` channel.
+    pub async fn select(&mut self, index: usize) -> anyhow::Result<()> {
+        self.release().await;
+        self.imp.select(index).await
     }
 
     pub async fn input(&mut self, i: Input) -> anyhow::Result<()> {
@@ -70,6 +98,12 @@ impl Screen {
         self.imp.input(i).await
     }
 
+    /// Privacy mode: blank this computer's own display and ignore its own mouse and keyboard
+    /// while the viewer works. Errors where the system can't do it.
+    pub async fn privacy(&mut self, on: bool) -> anyhow::Result<()> {
+        self.imp.privacy(on).await
+    }
+
     pub async fn release(&mut self) {
         for i in std::mem::take(&mut self.held) {
             let up = match i {
@@ -83,6 +117,7 @@ impl Screen {
 
     pub async fn close(mut self) {
         self.release().await;
+        let _ = self.imp.privacy(false).await;
         self.imp.close().await;
     }
 }
@@ -170,6 +205,19 @@ pub fn evdev(key: Key) -> Option<u16> {
         PageDown => 109,
         Insert => 110,
         Delete => 111,
+        BrowserBack => 158,
+        F13 => 183,
+        F14 => 184,
+        F15 => 185,
+        F16 => 186,
+        F17 => 187,
+        F18 => 188,
+        F19 => 189,
+        F20 => 190,
+        F21 => 191,
+        F22 => 192,
+        F23 => 193,
+        F24 => 194,
         _ => return None,
     })
 }

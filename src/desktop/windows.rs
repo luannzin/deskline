@@ -51,7 +51,15 @@ impl Screen {
                 };
                 mouse(flags, 0, 0, 0)
             }
-            Input::Scroll { steps } => mouse(MOUSEEVENTF_WHEEL, 0, 0, steps * 120),
+            Input::Scroll { x, y } => {
+                if y != 0 {
+                    mouse(MOUSEEVENTF_WHEEL, 0, 0, y * 120)
+                }
+                if x != 0 {
+                    mouse(MOUSEEVENTF_HWHEEL, 0, 0, x * 120)
+                }
+            }
+            Input::CtrlAltDel => {}
             Input::Key { code, down } => {
                 let Some((scan, extended)) = scancode(code) else { return Ok(()) };
                 let mut flags = KEYEVENTF_SCANCODE;
@@ -65,6 +73,23 @@ impl Screen {
                 send(INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki } });
             }
         }
+        Ok(())
+    }
+
+    pub fn monitors(&self) -> Vec<super::Monitor> {
+        vec![super::Monitor { name: "Primary".into(), w: 0, h: 0, primary: true }]
+    }
+
+    pub fn current(&self) -> usize {
+        0
+    }
+
+    pub async fn select(&mut self, _index: usize) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    pub async fn privacy(&mut self, on: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(!on, "privacy mode isn't available yet");
         Ok(())
     }
 

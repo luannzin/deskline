@@ -99,9 +99,34 @@ impl Screen {
                 p.notify_pointer_button(s, code, state(down), Default::default()).await?
             }
             // Portal steps grow downward; ours grow upward.
-            Input::Scroll { steps } => p.notify_pointer_axis_discrete(s, Axis::Vertical, -steps, Default::default()).await?,
+            Input::Scroll { x, y } => {
+                if y != 0 {
+                    p.notify_pointer_axis_discrete(s, Axis::Vertical, -y, Default::default()).await?
+                }
+                if x != 0 {
+                    p.notify_pointer_axis_discrete(s, Axis::Horizontal, x, Default::default()).await?
+                }
+            }
             Input::Key { code, down } => p.notify_keyboard_keycode(s, code as i32, state(down), Default::default()).await?,
+            Input::CtrlAltDel => {}
         }
+        Ok(())
+    }
+
+    pub fn monitors(&self) -> Vec<super::Monitor> {
+        vec![super::Monitor { name: "Screen".into(), w: self.size.0 as u32, h: self.size.1 as u32, primary: true }]
+    }
+
+    pub fn current(&self) -> usize {
+        0
+    }
+
+    pub async fn select(&mut self, _index: usize) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    pub async fn privacy(&mut self, on: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(!on, "privacy mode isn't available on Linux");
         Ok(())
     }
 

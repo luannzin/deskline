@@ -4,7 +4,21 @@ use openh264::decoder::Decoder as H264Decoder;
 use openh264::encoder::{BitRate, Complexity, Encoder as H264Encoder, EncoderConfig, FrameRate, RateControlMode, UsageType};
 use openh264::formats::{BgraSliceU8, RgbaSliceU8, YUVBuffer, YUVSource};
 
+use serde::{Deserialize, Serialize};
+
 use crate::desktop::Frame;
+
+/// What the viewer prefers when the link or the CPU can't give everything.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Quality {
+    /// Full size up to 1920 wide, a solid bitrate.
+    #[default]
+    Balanced,
+    /// Full size at any width, more bits: crisp text, more bandwidth.
+    Sharp,
+    /// Smaller picture, fewer bits: for slow links.
+    Smooth,
+}
 
 #[derive(Default)]
 pub struct Encoder {
@@ -13,6 +27,21 @@ pub struct Encoder {
 }
 
 impl Encoder {
+    // STUB: quality, rate control and hardware encoding to be implemented.
+    pub fn new(_q: Quality) -> Self {
+        Self::default()
+    }
+
+    pub fn set_quality(&mut self, _q: Quality) {}
+
+    /// Congestion control: `fraction` (0.1..=1.0) of the quality's full bitrate.
+    pub fn set_rate(&mut self, _fraction: f32) {}
+
+    /// Whether a hardware encoder is in use.
+    pub fn hardware(&self) -> bool {
+        false
+    }
+
     /// Encode one frame; `key` forces a keyframe. A new size starts a new stream (keyframe
     /// with fresh SPS), which the decoder follows on its own.
     pub fn encode(&mut self, f: &Frame, key: bool) -> anyhow::Result<Vec<u8>> {

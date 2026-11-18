@@ -359,7 +359,7 @@ fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool) 
                 let steps = v.scroll.trunc();
                 if steps != 0.0 {
                     v.scroll -= steps;
-                    send(Input::Scroll { steps: steps as i32 });
+                    send(Input::Scroll { x: 0, y: steps as i32 });
                 }
             }
             UiEvent::Key { key: k, physical_key, pressed, .. } => {

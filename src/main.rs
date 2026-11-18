@@ -1,10 +1,19 @@
 // No console window behind the app on Windows release builds.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod audio;
+mod autostart;
 mod codec;
 mod desktop;
+mod files;
+#[cfg(windows)]
+mod keyhook;
 mod net;
+#[cfg(windows)]
+mod service;
+mod tray;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 

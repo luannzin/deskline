@@ -1,6 +1,8 @@
 [package]
 name = "deskline"
-version = "0.1.0"
+# Bumping this and pushing to main publishes release v<version> (.github/workflows/release.yml),
+# which installed copies then update to.
+version = "0.2.0"
 edition = "2024"
 description = "Remote desktop with no server: share a code, accept, see and control the other screen."
 
