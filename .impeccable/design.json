@@ -1,0 +1,162 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-18T00:00:00Z",
+  "title": "Design System: Deskline",
+  "extensions": {
+    "source": "Values read from src/look.rs, src/ui.rs and tools/logo.py; the app was not run (maintainer's rule), so nothing here is sampled from a render. Components are egui widgets; the html/css below are approximations for the panel.",
+    "colorMeta": {
+      "ground": { "role": "neutral", "displayName": "Soft Black Ground", "canonical": "#161616", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "tile": { "role": "neutral", "displayName": "Tile Grey", "canonical": "#1f1f1f", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "well": { "role": "neutral", "displayName": "Well Grey", "canonical": "#1c1c1c", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "hairline": { "role": "neutral", "displayName": "Hairline", "canonical": "#242424", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "raised": { "role": "neutral", "displayName": "Raised", "canonical": "#262626", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "hover": { "role": "neutral", "displayName": "Hover", "canonical": "#323232", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "pressed": { "role": "neutral", "displayName": "Pressed", "canonical": "#404040", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "ink": { "role": "primary", "displayName": "Paper Ink", "canonical": "#f5f5f5", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "ink-soft": { "role": "neutral", "displayName": "Soft Ink", "canonical": "#b2b2b2", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "ink-muted": { "role": "neutral", "displayName": "Muted Ink", "canonical": "#818181", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ececec"] },
+      "sharing-red": { "role": "secondary", "displayName": "Sharing Red", "canonical": "#9b2c2c", "tonalRamp": ["oklch(0.15 0.05 25)", "oklch(0.26 0.09 25)", "oklch(0.38 0.13 25)", "oklch(0.49 0.15 25)", "oklch(0.61 0.15 25)", "oklch(0.72 0.12 25)", "oklch(0.84 0.07 25)", "oklch(0.95 0.02 25)"] },
+      "on-red": { "role": "neutral", "displayName": "On Red", "canonical": "#ffffff", "tonalRamp": ["#111111", "#1f1f1f", "#363636", "#525252", "#737373", "#9a9a9a", "#c4c4c4", "#ffffff"] },
+      "control-green": { "role": "secondary", "displayName": "Control Green", "canonical": "#5ac878", "tonalRamp": ["oklch(0.15 0.04 150)", "oklch(0.26 0.07 150)", "oklch(0.38 0.1 150)", "oklch(0.49 0.13 150)", "oklch(0.61 0.15 150)", "oklch(0.72 0.15 150)", "oklch(0.84 0.1 150)", "oklch(0.95 0.04 150)"] },
+      "dusk-violet": { "role": "tertiary", "displayName": "Dusk Violet", "canonical": "#3a2a6b", "tonalRamp": ["oklch(0.15 0.05 290)", "oklch(0.26 0.09 290)", "oklch(0.38 0.12 290)", "oklch(0.49 0.13 290)", "oklch(0.61 0.12 290)", "oklch(0.72 0.1 290)", "oklch(0.84 0.06 290)", "oklch(0.95 0.02 290)"] },
+      "dusk-plum": { "role": "tertiary", "displayName": "Dusk Plum", "canonical": "#7a3361", "tonalRamp": ["oklch(0.15 0.05 345)", "oklch(0.26 0.08 345)", "oklch(0.38 0.11 345)", "oklch(0.49 0.13 345)", "oklch(0.61 0.13 345)", "oklch(0.72 0.1 345)", "oklch(0.84 0.06 345)", "oklch(0.95 0.02 345)"] },
+      "dusk-ember": { "role": "tertiary", "displayName": "Dusk Ember", "canonical": "#e0703f", "tonalRamp": ["oklch(0.15 0.04 45)", "oklch(0.26 0.07 45)", "oklch(0.38 0.1 45)", "oklch(0.49 0.13 45)", "oklch(0.61 0.15 45)", "oklch(0.72 0.15 45)", "oklch(0.84 0.09 45)", "oklch(0.95 0.03 45)"] },
+      "dusk-gold": { "role": "tertiary", "displayName": "Dusk Gold", "canonical": "#ffd180", "tonalRamp": ["oklch(0.15 0.03 80)", "oklch(0.26 0.05 80)", "oklch(0.38 0.07 80)", "oklch(0.49 0.09 80)", "oklch(0.61 0.11 80)", "oklch(0.72 0.12 80)", "oklch(0.84 0.11 80)", "oklch(0.95 0.05 80)"] },
+      "night": { "role": "tertiary", "displayName": "Night", "canonical": "#110d24", "tonalRamp": ["oklch(0.15 0.04 290)", "oklch(0.26 0.06 290)", "oklch(0.38 0.07 290)", "oklch(0.49 0.07 290)", "oklch(0.61 0.06 290)", "oklch(0.72 0.05 290)", "oklch(0.84 0.03 290)", "oklch(0.95 0.01 290)"] }
+    },
+    "typographyMeta": {
+      "title": { "displayName": "Title", "purpose": "Section heads, the current tab, prompt questions, the sharing bar's sentence, ink button labels. Same size as body; weight sets it apart." },
+      "body": { "displayName": "Body", "purpose": "Everything else: buttons, fields, rows, explanations, egui's Small style." },
+      "code-display": { "displayName": "Code Display", "purpose": "This computer's code in its well only, in three even lines." },
+      "mono": { "displayName": "Mono", "purpose": "Key fingerprints and the peer code on the connecting screen." }
+    },
+    "shadows": [
+      { "name": "floating-window", "value": "egui default window shadow, color rgba(0,0,0,0.55)", "purpose": "Floating windows only (the sharer's Chat window). Black at 140/255." },
+      { "name": "popup", "value": "egui default popup shadow, color rgba(0,0,0,0.47)", "purpose": "Combo menus and popups only. Black at 120/255." }
+    ],
+    "motion": [
+      { "name": "copied", "value": "2s", "purpose": "Copy code reads Copied in place, then returns." },
+      { "name": "waiting-sweep", "value": "2.4s loop, repaint every 50ms", "purpose": "The dusk front sweeping left to right while connecting or loading a folder." },
+      { "name": "link-searching", "value": "drift 6 cells/s, repaint every 120ms", "purpose": "Sparse violet dots drifting while the link is down." }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Ink Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The completing action of a group: paper ink fill, ground text in Inter Medium.",
+      "html": "<button class=\"ds-btn-ink\">Copy code</button>",
+      "css": ".ds-btn-ink { background: #f5f5f5; color: #161616; font: 500 15px Inter, sans-serif; padding: 6px 12px; min-height: 32px; border: none; border-radius: 6px; } .ds-btn-ink:focus-visible { outline: 1px solid #f5f5f5; outline-offset: 2px; } .ds-btn-ink:disabled { background: #262626; color: #818181; }"
+    },
+    {
+      "name": "Plain Button",
+      "kind": "button",
+      "refersTo": "button",
+      "description": "Secondary choices: raised grey, hairline edge, brighter under the pointer.",
+      "html": "<button class=\"ds-btn\">Decline</button>",
+      "css": ".ds-btn { background: #262626; color: #f5f5f5; font: 400 15px Inter, sans-serif; padding: 6px 12px; min-height: 30px; border: 1px solid #242424; border-radius: 6px; } .ds-btn:hover { background: #323232; border-color: #404040; } .ds-btn:active { background: #404040; } .ds-btn:focus-visible { outline: 1px solid #f5f5f5; outline-offset: 2px; }"
+    },
+    {
+      "name": "Quiet Button",
+      "kind": "button",
+      "refersTo": "button-quiet",
+      "description": "Only soft text until the pointer is on it.",
+      "html": "<button class=\"ds-btn-quiet\">Change</button>",
+      "css": ".ds-btn-quiet { background: transparent; color: #b2b2b2; font: 400 15px Inter, sans-serif; padding: 6px 12px; border: 1px solid transparent; border-radius: 6px; } .ds-btn-quiet:hover { background: #323232; border-color: #404040; } .ds-btn-quiet:focus-visible { outline: 1px solid #f5f5f5; outline-offset: 2px; }"
+    },
+    {
+      "name": "Field with Button",
+      "kind": "input",
+      "refersTo": "text-field",
+      "description": "A well-grey field taking the line's width, its ink button at the end.",
+      "html": "<div class=\"ds-field-row\"><input class=\"ds-field\" placeholder=\"Paste their code\"><button class=\"ds-field-go\">Connect</button></div>",
+      "css": ".ds-field-row { display: flex; gap: 8px; width: 420px; } .ds-field { flex: 1; background: #1c1c1c; color: #f5f5f5; font: 400 15px Inter, sans-serif; height: 32px; padding: 0 8px; border: 1px solid #242424; border-radius: 6px; } .ds-field::placeholder { color: #818181; } .ds-field:focus-visible { outline: none; border-color: #f5f5f5; } .ds-field-go { background: #f5f5f5; color: #161616; font: 500 15px Inter, sans-serif; padding: 6px 12px; border: none; border-radius: 6px; }"
+    },
+    {
+      "name": "Top Bar Tabs",
+      "kind": "nav",
+      "refersTo": "tab-current",
+      "description": "Current tab in medium ink with a 1px ink underline 6px below; others soft.",
+      "html": "<nav class=\"ds-tabs\"><span class=\"ds-mark\"></span><a class=\"ds-tab ds-tab-on\">Deskline</a><a class=\"ds-tab\">Ana</a><a class=\"ds-tab ds-tab-end\">Settings</a></nav>",
+      "css": ".ds-tabs { display: flex; align-items: center; gap: 8px; background: #161616; padding: 10px 16px; font: 400 15px Inter, sans-serif; } .ds-mark { width: 32px; height: 32px; background: linear-gradient(#3a2a6b, #7a3361, #e0703f, #ffd180); image-rendering: pixelated; } .ds-tab { color: #b2b2b2; padding-bottom: 6px; border-bottom: 1px solid transparent; cursor: pointer; } .ds-tab-on { color: #f5f5f5; font-weight: 500; border-bottom-color: #f5f5f5; } .ds-tab-end { margin-left: auto; }"
+    },
+    {
+      "name": "Row",
+      "kind": "custom",
+      "refersTo": "row",
+      "description": "A list row whose tile lights only under the pointer, reaching 12px past the text.",
+      "html": "<div class=\"ds-row\"><span class=\"ds-row-name\">Office PC</span><span class=\"ds-row-meta\">3f9a1c0b</span><button class=\"ds-row-act\">Connect</button></div>",
+      "css": ".ds-row { display: flex; gap: 8px; align-items: center; padding: 8px 12px; margin: 0 -12px; border-radius: 14px; font: 400 15px Inter, sans-serif; } .ds-row:hover { background: #1f1f1f; } .ds-row-name { color: #f5f5f5; } .ds-row-meta { color: #818181; font: 400 14px 'Geist Mono', monospace; } .ds-row-act { margin-left: auto; background: none; border: none; color: #b2b2b2; font: inherit; }"
+    },
+    {
+      "name": "Code Well",
+      "kind": "card",
+      "refersTo": "code-well",
+      "description": "This computer's code, 20px Geist Mono in three even lines on Well Grey.",
+      "html": "<div class=\"ds-well\">K7QF  2MXA  9PDE  R4TN  HW8C<br>J3VB  ZL6S  YQ2M  D9KF  8XRA<br>T5WE  NC4P  QH7J</div>",
+      "css": ".ds-well { background: #1c1c1c; color: #f5f5f5; font: 400 20px 'Geist Mono', monospace; white-space: pre; padding: 16px 20px; border-radius: 14px; width: 520px; }"
+    },
+    {
+      "name": "Sharing Bar",
+      "kind": "custom",
+      "refersTo": "sharing-bar",
+      "description": "Red while someone is in this computer; Stop sharing one click away.",
+      "html": "<div class=\"ds-share\"><strong>Ana sees and controls your screen</strong><span class=\"ds-share-acts\"><button class=\"ds-share-sub\">Chat</button><button class=\"ds-share-sub\">Take back control</button><button class=\"ds-share-stop\">Stop sharing</button></span></div>",
+      "css": ".ds-share { display: flex; align-items: center; background: #9b2c2c; color: #ffffff; padding: 8px 16px; font: 500 15px Inter, sans-serif; } .ds-share-acts { margin-left: auto; display: flex; gap: 8px; } .ds-share-sub { background: rgba(255,255,255,0.11); color: #ffffff; border: none; border-radius: 6px; padding: 6px 12px; font: 400 15px Inter, sans-serif; } .ds-share-stop { background: #ffffff; color: #9b2c2c; border: none; border-radius: 6px; padding: 6px 12px; font: 400 15px Inter, sans-serif; } .ds-share button:focus-visible { outline: 1px solid #ffffff; outline-offset: 2px; }"
+    },
+    {
+      "name": "Link Meter",
+      "kind": "custom",
+      "refersTo": "link-meter",
+      "description": "The link between computers as dusk dots, reaching and densifying with quality (approximated here as a dot grid).",
+      "html": "<span class=\"ds-link\"></span><span class=\"ds-link-text\">Direct  38 ms</span>",
+      "css": ".ds-link { display: inline-block; width: 48px; height: 15px; background-image: radial-gradient(#ffd180 0 0), linear-gradient(90deg, #3a2a6b 25%, #7a3361 25% 50%, #e0703f 50% 75%, #ffd180 75%); background-size: 0 0, 100% 100%; -webkit-mask: conic-gradient(#000 0 25%, transparent 0) 0 0 / 3px 3px; mask: conic-gradient(#000 0 25%, transparent 0) 0 0 / 3px 3px; vertical-align: middle; } .ds-link-text { color: #818181; font: 400 15px Inter, sans-serif; margin-left: 8px; }"
+    },
+    {
+      "name": "Prompt",
+      "kind": "card",
+      "refersTo": "prompt",
+      "description": "The one question the helped person answers, as a modal card.",
+      "html": "<div class=\"ds-prompt\"><strong>Someone wants to see your screen</strong><p class=\"ds-prompt-soft\">Only accept if you know who this is.</p><div class=\"ds-prompt-acts\"><button class=\"ds-prompt-ink\">Accept</button><button class=\"ds-prompt-plain\">Decline</button></div></div>",
+      "css": ".ds-prompt { width: 380px; background: #1f1f1f; border: 1px solid #242424; border-radius: 14px; padding: 24px; color: #f5f5f5; font: 400 15px Inter, sans-serif; } .ds-prompt strong { font-weight: 500; } .ds-prompt-soft { color: #b2b2b2; margin: 12px 0 20px; } .ds-prompt-acts { display: flex; gap: 8px; } .ds-prompt-ink { background: #f5f5f5; color: #161616; font: 500 15px Inter, sans-serif; border: none; border-radius: 6px; padding: 6px 12px; } .ds-prompt-plain { background: #262626; color: #f5f5f5; border: 1px solid #242424; border-radius: 6px; padding: 6px 12px; font: inherit; } .ds-prompt-plain:hover { background: #323232; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Column, Lit by the Line",
+    "overview": "The window is a calm page from luannzin.com (the maintainer's own system, `Documents/luannzin.com/DESIGN.md`, which this one follows): one centred column on a near-black neutral ground, one size of Inter, hierarchy by weight and ink tier, hairlines and rows instead of cards and boxes. The interface recedes; a row lights up as a tile only under the pointer.\n\nColour is reserved for meaning. Red is a bar that says someone is in this computer, with the way to stop them one click away. Green says you have control. The dusk (violet, plum, ember, gold in a 4x4 Bayer ordered dither) is the one piece of art, taken from the Deskline mark and luannzin.com's footer strip, and it does a job: it is the link between the two computers, drawn denser and warmer the better it is, sweeping while connecting and drifting sparse while reconnecting.\n\nIt refuses the remote-desktop category default: an accent-coloured sidebar app with icon tiles and a numeric ID in a big blue box. The code is quiet type in a well; the one filled button is paper ink.\n\nEvery string exists in English and Brazilian Portuguese (`src/i18n.rs`); Portuguese runs longer, so lines that pair a field with its button lay out right to left and let the field take whatever width the words leave.",
+    "keyCharacteristics": [
+      "A 560px column, centred, left-aligned inside, scrolling as a whole (Home, Settings); a 360px centred stack for the connecting screen.",
+      "One text size (15px Inter); hierarchy is Inter Medium against Regular and three ink tiers. Code is Geist Mono.",
+      "Neutral greys for all chrome; colour only for sharing (red), control (green) and the link (dusk).",
+      "Hairlines (1px) divide; rows light up as 14px-cornered tiles on hover; nothing is boxed at rest except the code well and the prompts.",
+      "Pixel art drawn by code: the 32px mark at whole-pixel multiples, dither dots snapped to device pixels."
+    ],
+    "rules": [
+      { "name": "The Colour Means Something Rule", "body": "Red is someone in this computer, green is you having control, the dusk is the link. Nothing else is coloured, and none of the three is ever used to decorate.", "section": "colors" },
+      { "name": "The No Accent Rule", "body": "Chrome has no hue. Selection, hover, links and focus all stay on the neutral axis (hyperlinks are ink; selection is the pressed grey with an ink stroke).", "section": "colors" },
+      { "name": "The Dusk Is the Link Rule", "body": "The dusk palette appears only as Bayer-dithered dots, and in the window only where it stands for the connection between two computers (or closes the Home page as luannzin.com's strip does). Its density and warmth carry information; it is never a background.", "section": "colors" },
+      { "name": "The One Size Rule", "body": "All Inter text is 15px. A new head gets Inter Medium and full ink, not a bigger size. Geist Mono is the only family with other sizes: 20px for the code in the well, 14px for fingerprints.", "section": "typography" },
+      { "name": "The One Column Rule", "body": "Pages are one column; groups are separated by space and hairlines, not by panels or cards.", "section": "layout" },
+      { "name": "The Hairline Edge Rule", "body": "A container at rest is a tonal fill with a 1px Hairline, or nothing at all. Shadows belong to things that float, never to things on the page.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep new pages in the 560px column, separated by 40px and hairlines, with an Inter Medium 15px head 4px above its content.",
+      "Do use the three ink tiers: ink for names and what you act on, soft for explanations, muted for supporting state.",
+      "Do give each group exactly one ink button, its completing action; everything else is a plain or quiet button.",
+      "Do say state in words, and use red, green or the dusk only for the three meanings they carry.",
+      "Do draw the dusk as 2px dots on a 3px Bayer grid snapped to device pixels, and the mark at whole multiples of its pixels.",
+      "Do draw small marks (close) as strokes in code rather than glyphs.",
+      "Do write every string in English and Brazilian Portuguese and let fields, not buttons, absorb the length difference."
+    ],
+    "donts": [
+      "Don't add an accent colour, a coloured selection or a coloured link.",
+      "Don't raise Inter's size for hierarchy; use weight and ink tier.",
+      "Don't box groups in cards or tiles at rest; a tile appears only under the pointer, and the code well and prompts are the only resting containers.",
+      "Don't put shadows on anything that sits on the page.",
+      "Don't use the dusk as a fill, a gradient or a decoration away from the link, the strip and the mark.",
+      "Don't hide the sharing bar or move Stop sharing more than one click away while someone is in."
+    ]
+  }
+}
