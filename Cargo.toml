@@ -14,6 +14,8 @@ iroh = "1.4"
 iroh-mdns-address-lookup = "0.6"
 # Builds Cisco's OpenH264 from source into the binary: nothing to install next to the app.
 openh264 = "0.9"
+# The raw option ids for changing the bitrate mid-stream; the same crate openh264 builds.
+openh264-sys2 = { version = "0.9", default-features = false }
 postcard = { version = "1", features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
@@ -32,6 +34,9 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Variant",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 

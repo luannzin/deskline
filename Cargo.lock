@@ -916,6 +916,7 @@ dependencies = [
  "iroh",
  "iroh-mdns-address-lookup",
  "openh264",
+ "openh264-sys2",
  "pipewire",
  "postcard",
  "serde",
