@@ -18,6 +18,8 @@ argon2 = "0.6"
 cpal = "0.18"
 # glow (OpenGL) instead of wgpu: smaller binary, faster build, runs on old GPUs and VMs.
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
+# Tray icons are pngs in assets/.
+image = { version = "0.25", default-features = false, features = ["png"] }
 iroh = "1.4"
 iroh-mdns-address-lookup = "0.6"
 # Builds Cisco's OpenH264 from source into the binary: nothing to install next to the app.
@@ -28,9 +30,13 @@ rfd = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+# Linux uses the pure-Rust StatusNotifierItem backend: no GTK to install or link.
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 # Opus for the host's sound: libopus 1.3.1 translated to Rust. No C compiler or CMake, so it
 # builds the same everywhere, the mingw cross build included.
 unsafe-libopus = "0.2"
+# Update checks and downloads from GitHub Releases; rustls so no OS TLS library is needed.
+ureq = { version = "3", default-features = false, features = ["rustls", "json"] }
 
 # Linux: the xdg RemoteDesktop/ScreenCast portals with PipeWire for the frames (GNOME, KDE,
 # wlroots), Wayland virtual input on wlroots, and X11 directly elsewhere. Building needs
@@ -70,6 +76,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# Service install and the sign-in Run key.
 windows-registry = "0.6"
 
 # macOS: CoreGraphics display streams for the frames and CGEvent for input. The same versions
@@ -93,6 +100,10 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGWindow",
 ] }
 objc2-io-surface = { version = "0.3", default-features = false, features = ["std", "objc2", "IOSurfaceRef", "IOSurfaceTypes", "libc"] }
+
+# Icon and version info in the .exe (build.rs).
+[build-dependencies]
+winresource = { version = "0.1", default-features = false }
 
 [profile.release]
 lto = "thin"

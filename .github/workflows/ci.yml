@@ -1,0 +1,30 @@
+name: ci
+
+# Tests on every push and pull request, on each platform Deskline ships for.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-22.04: the oldest PipeWire and glibc the .deb supports
+        os: [ubuntu-22.04, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable --no-self-update && rustup default stable
+
+      - name: Build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: tools/install-linux-deps.sh
+      # nasm: the fast H.264 encoder
+      - if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+      - if: runner.os == 'macOS'
+        run: brew install nasm
+
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
