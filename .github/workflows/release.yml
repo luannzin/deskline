@@ -68,6 +68,8 @@ jobs:
           tools/install-linux-deps.sh
           cargo test --release
           tools/build-deb.sh
+          # portable: the bare binary, runs from anywhere (needs PipeWire and a desktop session)
+          cp target/release/deskline dist/deskline-linux-x86_64
 
       - name: nasm (Windows)
         if: runner.os == 'Windows'
