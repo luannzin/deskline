@@ -38,8 +38,62 @@ pub struct Start {
     pub connect: Option<(String, Option<String>)>,
 }
 
+// luannzin.com's neutral system: near-black ground, paper ink in three tiers, hairlines, no
+// accent colour. Colour means something here: red while sharing, green for control, and the
+// dusk in the dither strip and the mark, which are art.
+const GROUND: Color32 = Color32::from_rgb(0x16, 0x16, 0x16);
+const TILE: Color32 = Color32::from_rgb(0x1f, 0x1f, 0x1f);
+const WELL: Color32 = Color32::from_rgb(0x1c, 0x1c, 0x1c);
+const HAIRLINE: Color32 = Color32::from_rgb(0x24, 0x24, 0x24);
+const RAISED: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+const HOVER: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
+const PRESSED: Color32 = Color32::from_rgb(0x40, 0x40, 0x40);
+const INK: Color32 = Color32::from_rgb(0xf5, 0xf5, 0xf5);
+const SOFT: Color32 = Color32::from_rgb(0xb2, 0xb2, 0xb2);
+const MUTED: Color32 = Color32::from_rgb(0x81, 0x81, 0x81);
 const RED: Color32 = Color32::from_rgb(150, 40, 40);
 const GREEN: Color32 = Color32::from_rgb(90, 200, 120);
+/// The dusk of luannzin.com's dither strip, sky to horizon.
+const DUSK: [Color32; 4] =
+    [Color32::from_rgb(0x3a, 0x2a, 0x6b), Color32::from_rgb(0x7a, 0x33, 0x61), Color32::from_rgb(0xe0, 0x70, 0x3f), Color32::from_rgb(0xff, 0xd1, 0x80)];
+const BAYER: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+
+fn theme(ctx: &egui::Context) {
+    let mut v = egui::Visuals::dark();
+    (v.panel_fill, v.window_fill, v.faint_bg_color, v.extreme_bg_color, v.code_bg_color) = (GROUND, TILE, TILE, WELL, WELL);
+    v.window_stroke = egui::Stroke::new(1.0, HAIRLINE);
+    v.hyperlink_color = INK;
+    v.selection.bg_fill = PRESSED;
+    v.selection.stroke = egui::Stroke::new(1.0, INK);
+    let w = &mut v.widgets;
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, HAIRLINE);
+    w.noninteractive.fg_stroke = egui::Stroke::new(1.0, SOFT);
+    for (s, fill) in [(&mut w.inactive, RAISED), (&mut w.hovered, HOVER), (&mut w.active, PRESSED), (&mut w.open, HOVER)] {
+        (s.bg_fill, s.weak_bg_fill) = (fill, fill);
+        s.fg_stroke = egui::Stroke::new(1.0, INK);
+        s.bg_stroke = egui::Stroke::new(1.0, if fill == RAISED { HAIRLINE } else { PRESSED });
+    }
+    // Same look whatever the system's light or dark setting.
+    ctx.all_styles_mut(|s| s.visuals = v.clone());
+}
+
+/// luannzin.com's footer strip: four blocks of the dusk, each denser than the last, 2px dots on
+/// a 3px grid in a Bayer pattern.
+fn dither_strip(ui: &mut egui::Ui, height: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
+    let (cols, rows) = ((rect.width() / 3.0) as usize, (height / 3.0) as usize);
+    let painter = ui.painter_at(rect);
+    for c in 0..cols {
+        let block = (c * 4 / cols.max(1)).min(3);
+        let fill = (block + 1) as f32 / 4.0;
+        for r in 0..rows {
+            if (BAYER[(r % 4) * 4 + c % 4] as f32) / 16.0 < fill {
+                let at = rect.min + egui::vec2(c as f32 * 3.0, r as f32 * 3.0);
+                painter.rect_filled(Rect::from_min_size(at, egui::vec2(2.0, 2.0)), 0.0, DUSK[block]);
+            }
+        }
+    }
+}
 
 pub struct App {
     ep: Endpoint,
@@ -70,6 +124,8 @@ pub struct App {
     hidden: bool,
     quitting: bool,
     updater: Option<Updater>,
+    /// The pixel-art mark, drawn with nearest-neighbour so it stays crisp.
+    mark: TextureHandle,
     #[cfg(windows)]
     keys: std::sync::mpsc::Receiver<(u16, bool)>,
 }
@@ -157,6 +213,7 @@ struct Form {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, start: Start) -> Self {
         let ctx = cc.egui_ctx.clone();
+        theme(&ctx);
         let Start { ep, home, store, host, mut events, service, background, settings, connect } = start;
         // Host events wake the window, even while it's hidden in the tray.
         let (host_tx, host_events) = mpsc::unbounded_channel();
@@ -207,6 +264,11 @@ impl App {
             hidden,
             quitting: false,
             updater: (!service).then(|| Updater::start(home.join("update"))),
+            mark: {
+                let img = image::load_from_memory(include_bytes!("../assets/tray.png")).expect("the embedded mark is a png").to_rgba8();
+                let size = [img.width() as usize, img.height() as usize];
+                ctx.load_texture("mark", egui::ColorImage::from_rgba_unmultiplied(size, &img), TextureOptions::NEAREST)
+            },
             #[cfg(windows)]
             keys: keyhook::start(ctx),
         };
@@ -426,7 +488,8 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.set_max_width(460.0);
                 ui.add_space(20.0);
-                ui.heading(RichText::new("Deskline").size(28.0).strong());
+                ui.add(egui::Image::new(&self.mark).fit_to_exact_size(egui::vec2(64.0, 64.0)));
+                ui.label(RichText::new("Deskline").size(22.0).color(INK));
                 ui.add_space(16.0);
 
                 card(ui, |ui| {
@@ -480,6 +543,9 @@ impl App {
                 }
                 self.update_banner(ui);
                 self.contacts(ui);
+                ui.add_space(32.0);
+                dither_strip(ui, 32.0);
+                ui.add_space(16.0);
             });
         });
     }

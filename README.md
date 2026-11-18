@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Deskline" width="100%">
+  <img src="assets/banner.png" alt="Deskline: remote desktop with no server to run" width="100%">
 </p>
 
 <p align="center">
@@ -31,7 +31,9 @@ Grab the file for your system from [Releases](https://github.com/luannzin/deskli
 |---|---|---|
 | Windows 10/11 | `deskline.exe` | One file. Run it as is, or click **Install Deskline on this computer** to install it for everyone with its service (see below). |
 | Ubuntu 24.04+ / Debian 12+ | `deskline_amd64.deb` | `sudo apt install ./deskline_amd64.deb` |
+| Linux, portable | `deskline-linux-x86_64` | No install: `chmod +x deskline-linux-x86_64` and run it. Needs PipeWire and a desktop session. |
 | macOS 11+ | `Deskline.dmg` | Drag Deskline into Applications. Allow it under **System Settings → Privacy & Security → Screen Recording** and **Accessibility** when it asks. |
+| macOS, portable | `Deskline-macos.zip` | No install: unzip and open `Deskline.app` from anywhere. Same permissions as above. |
 
 The builds aren't signed with a paid certificate yet, so Windows SmartScreen says **More info →
 Run anyway** and macOS wants **Open Anyway** the first time.
@@ -151,7 +153,7 @@ tools/build-macos.sh
 
 The installers come from `tools/build-windows.sh`, `tools/build-deb.sh` and `tools/build-macos.sh`.
 Bumping `version` in `Cargo.toml` and pushing to `main` builds all three in GitHub Actions and
-publishes the release, which installed copies then update to. `tools/logo.py` draws the logo,
+publishes the release, which installed copies then update to. `tools/logo.py` draws the pixel-art mark,
 the icons and the banner.
 
 Run two copies on one machine with `--home DIR` (each folder is its own identity).

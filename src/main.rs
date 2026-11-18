@@ -128,6 +128,7 @@ fn window(home: PathBuf, background: bool, settings: bool, connect: Option<(Stri
             .with_app_id("deskline")
             .with_inner_size([760.0, 560.0])
             .with_min_inner_size([420.0, 380.0])
+            .with_icon(std::sync::Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).expect("the embedded icon is a png")))
             .with_visible(!background),
         ..Default::default()
     };

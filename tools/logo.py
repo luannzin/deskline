@@ -1,141 +1,200 @@
-"""Draws Deskline's mark and writes every asset made from it:
+"""Draws Deskline's mark and everything made from it:
 
     python tools/logo.py
 
 assets/icon.png (512), assets/icon.ico (16-256), assets/tray.png and assets/tray_alert.png
-(64, the tray picks its size), assets/banner.svg (the README header).
+(32, the tray picks its size), assets/banner.png (the README header).
 
-The mark: a screen, and a line coming in from outside it that ends at a pointer. Your line
-into someone else's desk. Near-black ground and paper-white ink like the rest of the author's
-work; the one colour is the line, the green the app uses for "you have control".
+The mark is 32x32 pixel art, like LanPet's: a monitor with a dark outline, and on its screen
+the dusk from luannzin.com's dither strip (violet, plum, ember, gold) in a 4x4 Bayer ordered
+dither, with a pointer on it: someone else's screen, and you in it. Pixels are placed one by
+one and scaled up with nearest-neighbour, so every size stays crisp.
 
-Everything is drawn at 8x and scaled down, so edges are smooth without any anti-aliasing
-code. Below 48 px the pointer and the stand can't be read, so small sizes get a simpler mark
-with heavier strokes instead of a blurry copy of the big one.
+The banner is the same world at banner size: a field of dots on a grid dithered from the night
+down to the dusk glow, the mark, and the name in a 5x7 pixel face drawn here.
 """
 
 import os
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets")
 
-GROUND = (22, 22, 22, 255)  # #161616
-HAIRLINE = (36, 36, 36, 255)  # #242424
-INK = (245, 245, 245, 255)  # #f5f5f5
-LINE = (74, 222, 128, 255)  # #4ade80
-ALERT = (239, 68, 68, 255)  # #ef4444
-SS = 8
+
+def rgb(h):
+    return tuple(int(h[i : i + 2], 16) for i in (1, 3, 5)) + (255,)
 
 
-def mark(size, simple=False, alert=False):
-    """The mark at `size` px. Coordinates are on a 1024 grid, scaled to the canvas."""
-    n = size * SS
-    k = n / 1024
-    img = Image.new("RGBA", (n, n), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
+NIGHT = rgb("#110d24")
+DUSK = [rgb("#3a2a6b"), rgb("#7a3361"), rgb("#e0703f"), rgb("#ffd180")]
+LINE = rgb("#1a1424")  # outlines
+BEZEL = rgb("#e8e4f0")
+BEZEL_LIT = rgb("#ffffff")
+BEZEL_SHADE = rgb("#b4acc8")
+INK = rgb("#f5f5f5")
+ALERT = rgb("#ef4444")
+CLEAR = (0, 0, 0, 0)
+BAYER = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
 
-    def box(x0, y0, x1, y1):
-        return [x0 * k, y0 * k, x1 * k, y1 * k]
 
-    # heavier strokes when small, so they survive the downscale
-    w = 44 if not simple else 78
-    d.rounded_rectangle(box(0, 0, 1024, 1024), radius=230 * k, fill=GROUND)
-    if not simple:
-        d.rounded_rectangle(box(10, 10, 1014, 1014), radius=222 * k, outline=HAIRLINE, width=max(1, int(6 * k)))
+def dither(ramp, t, x, y):
+    """Colour of cell (x, y) at position t (0..1) along `ramp`, ordered-dithered."""
+    step = t * (len(ramp) - 1) + BAYER[y % 4][x % 4] / 16 - 0.5
+    return ramp[max(0, min(len(ramp) - 1, round(step)))]
 
-    if simple:
-        screen = (230, 240, 870, 700)
-        y = 470
-    else:
-        screen = (260, 240, 860, 660)
-        y = 450
-    d.rounded_rectangle(box(*screen), radius=(56 if not simple else 70) * k, outline=INK, width=int(w * k))
-    if not simple:
-        # stand: neck and foot
-        d.rectangle(box(528, 660, 592, 744), fill=INK)
-        d.rounded_rectangle(box(420, 744, 700, 788), radius=22 * k, fill=INK)
 
-    # The line crosses the screen's left edge: cut a gap in the frame so it reads as passing
-    # through, not as a cross.
-    x0, x1 = (116, 600) if not simple else (110, 640)
-    gap = w * 0.55
-    d.line(box(screen[0] - w, y, screen[0] + w, y), fill=GROUND, width=int((w + 2 * gap) * k))
-    d.line(box(x0, y, x1, y), fill=LINE, width=int(w * k))
-    r = w * (1.05 if not simple else 0.9)
-    d.ellipse(box(x0 - r, y - r, x0 + r, y + r), fill=LINE)
-    if simple:
-        d.ellipse(box(x1 - w / 2, y - w / 2, x1 + w / 2, y + w / 2), fill=LINE)
-    else:
-        # a pointer whose tip sits on the end of the line; its ground-coloured outline cuts
-        # the line and the frame cleanly where it overlaps them
-        s = 0.82
-        arrow = [(0, 0), (0, 300), (78, 226), (132, 344), (186, 320), (134, 204), (240, 204)]
-        pts = [((x1 + ax * s) * k, (y + ay * s) * k) for ax, ay in arrow]
-        d.polygon(pts, fill=GROUND, outline=GROUND, width=int(52 * k))
-        d.polygon(pts, fill=INK)
+# A pointer, 7 wide and 10 tall: o = outline, w = white.
+POINTER = [
+    "o......",
+    "oo.....",
+    "owo....",
+    "owwo...",
+    "owwwo..",
+    "owwwwo.",
+    "owwwwwo",
+    "owwoooo",
+    "owo....",
+    "oo.....",
+]
 
+
+def mark(alert=False):
+    """The 32x32 mark."""
+    img = Image.new("RGBA", (32, 32), CLEAR)
+    px = img.load()
+
+    def rect(x0, y0, x1, y1, c):
+        for y in range(y0, y1 + 1):
+            for x in range(x0, x1 + 1):
+                px[x, y] = c
+
+    # bezel: outline, fill, light from the upper left
+    rect(2, 4, 29, 23, LINE)
+    rect(3, 5, 28, 22, BEZEL)
+    rect(3, 5, 28, 5, BEZEL_LIT)
+    rect(3, 5, 3, 22, BEZEL_LIT)
+    rect(4, 22, 28, 22, BEZEL_SHADE)
+    rect(28, 6, 28, 22, BEZEL_SHADE)
+    for x, y in ((2, 4), (29, 4), (2, 23), (29, 23)):  # rounded corners
+        px[x, y] = CLEAR
+    # the screen: dusk, darkest at the top
+    rect(5, 7, 26, 20, LINE)
+    for y in range(8, 20):
+        for x in range(6, 26):
+            px[x, y] = dither(DUSK, (y - 8) / 11, x, y)
+    # stand
+    rect(13, 24, 18, 25, LINE)
+    rect(14, 24, 17, 24, BEZEL_SHADE)
+    rect(9, 26, 22, 28, LINE)
+    rect(10, 26, 21, 27, BEZEL)
+    rect(10, 26, 21, 26, BEZEL_LIT)
+    # the pointer, tip on the screen's upper middle
+    for dy, row in enumerate(POINTER):
+        for dx, c in enumerate(row):
+            if c != ".":
+                px[15 + dx, 9 + dy] = LINE if c == "o" else INK
     if alert:
-        c, rr = 820, 190
-        d.ellipse(box(c - rr - 40, 204 - rr - 40, c + rr + 40, 204 + rr + 40), fill=GROUND)
-        d.ellipse(box(c - rr, 204 - rr, c + rr, 204 + rr), fill=ALERT)
+        rect(23, 0, 31, 8, LINE)
+        rect(24, 1, 30, 7, ALERT)
+        for x, y in ((23, 0), (31, 0), (23, 8), (31, 8)):
+            px[x, y] = CLEAR
+    return img
 
-    return img.resize((size, size), Image.LANCZOS)
+
+def scaled(img, size):
+    """Nearest-neighbour up to a multiple, then down to `size` with a box filter so odd sizes
+    (24, 48) stay sharp-edged without uneven pixels."""
+    k = max(1, -(-size // img.width))
+    big = img.resize((img.width * k, img.height * k), Image.NEAREST)
+    return big if big.width == size else big.resize((size, size), Image.BOX)
+
+
+# 5x7 pixel face for the banner: one string of 35 cells per glyph, rows top to bottom.
+FONT = {
+    "A": ".###.#...##...#######...##...##...#",
+    "B": "####.#...##...#####.#...##...#####.",
+    "C": ".###.#...##....#....#....#...#.###.",
+    "D": "####.#...##...##...##...##...#####.",
+    "E": "######....#....####.#....#....#####",
+    "F": "######....#....####.#....#....#....",
+    "G": ".###.#...##....#.####...##...#.####",
+    "H": "#...##...##...#######...##...##...#",
+    "I": ".###...#....#....#....#....#...###.",
+    "K": "#...##..#.#.#..##...#.#..#..#.#...#",
+    "L": "#....#....#....#....#....#....#####",
+    "M": "#...###.###.#.##.#.##...##...##...#",
+    "N": "#...###..##.#.##..###...##...##...#",
+    "O": ".###.#...##...##...##...##...#.###.",
+    "P": "####.#...##...#####.#....#....#....",
+    "R": "####.#...##...#####.#.#..#..#.#...#",
+    "S": ".#####....#.....###.....#....#####.",
+    "T": "#####..#....#....#....#....#....#..",
+    "U": "#...##...##...##...##...##...#.###.",
+    "V": "#...##...##...##...##...#.#.#...#..",
+    "W": "#...##...##...##.#.##.#.##.#.#.#.#.",
+    "X": "#...##...#.#.#...#...#.#.#...##...#",
+    "Y": "#...##...#.#.#...#....#....#....#..",
+    "Z": "#####....#...#...#...#...#....#####",
+    "-": "." * 15 + ".###." + "." * 15,
+    "·": "." * 17 + "#" + "." * 17,
+    " ": "." * 35,
+}
+
+
+def text(img, s, x, y, scale, color):
+    """Draw `s` in the 5x7 face, `scale` image pixels per font pixel, 1 font pixel between
+    letters. Returns the x after the last letter."""
+    px = img.load()
+    for ch in s.upper():
+        g = FONT[ch].ljust(35, ".")
+        for i, c in enumerate(g):
+            if c == "#":
+                gx, gy = x + (i % 5) * scale, y + (i // 5) * scale
+                for yy in range(gy, gy + scale):
+                    for xx in range(gx, gx + scale):
+                        px[xx, yy] = color
+        x += 6 * scale
+    return x
 
 
 def banner():
-    """The README header, as an SVG (GitHub renders it; no filters, which GitHub strips)."""
-    sans = "Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
-    mono = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-    ramp = "\n".join(
-        f'    <rect x="0" y="{380 + i * 8}" width="1600" height="8" opacity="{o}" />'
-        for i, o in enumerate([0.05, 0.09, 0.15, 0.23, 0.33])
-    )
-    return f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 420" width="1600" height="420" role="img" aria-label="Deskline: remote desktop with no server to run">
-  <title>Deskline</title>
-  <!-- Generated by tools/logo.py. -->
-  <defs>
-    <pattern id="dots" width="8" height="8" patternUnits="userSpaceOnUse">
-      <rect width="4" height="4" fill="#f5f5f5" />
-    </pattern>
-  </defs>
-
-  <rect width="1600" height="420" fill="#161616" />
-
-  <!-- Two desks and the line between them: yours on the left, faint; theirs on the right. -->
-  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="930" y="118" width="190" height="132" rx="18" stroke="#f5f5f5" stroke-opacity="0.28" stroke-width="10" />
-    <path d="M1010 250 v26 M984 282 h52" stroke="#f5f5f5" stroke-opacity="0.28" stroke-width="10" />
-    <rect x="1230" y="86" width="270" height="190" rx="24" stroke="#f5f5f5" stroke-width="14" />
-    <path d="M1365 276 v34 M1325 316 h80" stroke="#f5f5f5" stroke-width="14" />
-    <path d="M1025 184 H1218" stroke="#161616" stroke-width="34" />
-    <path d="M1025 184 H1345" stroke="#4ade80" stroke-width="14" />
-  </g>
-  <circle cx="1025" cy="184" r="15" fill="#4ade80" />
-  <path d="M1345 184 v86 l22 -21 l16 34 l15 -7 l-15 -33 h31 z" fill="#f5f5f5" stroke="#161616" stroke-width="6" stroke-linejoin="round" />
-
-  <text x="110" y="238" font-family="{sans}" font-size="150" font-weight="600" letter-spacing="-5" fill="#f5f5f5">deskline</text>
-  <rect x="112" y="276" width="600" height="1.5" fill="#f5f5f5" fill-opacity="0.34" />
-  <text x="112" y="320" font-family="{mono}" font-size="21" letter-spacing="5.4" fill="#f5f5f5" fill-opacity="0.9">REMOTE DESKTOP WITH NO SERVER TO RUN</text>
-  <text x="112" y="356" font-family="{mono}" font-size="16" letter-spacing="4.2" fill="#f5f5f5" fill-opacity="0.62">WINDOWS · MACOS · LINUX · END-TO-END ENCRYPTED · OPEN SOURCE</text>
-
-  <g fill="url(#dots)">
-{ramp}
-  </g>
-</svg>
-"""
+    """1600x420: a field of dots on a 4px grid, night at the top dithering down to the dusk
+    glow at the bottom right where the mark sits, the name and two lines in the pixel face."""
+    w, h, cell = 1600, 420, 4
+    img = Image.new("RGBA", (w, h), NIGHT)
+    px = img.load()
+    ramp = [NIGHT] + DUSK
+    glow = (1300, 330)
+    for y in range(0, h, cell):
+        for x in range(0, w, cell):
+            near = max(0.0, 1 - ((x - glow[0]) ** 2 + ((y - glow[1]) * 1.6) ** 2) ** 0.5 / 900)
+            t = max(near ** 1.6, 0.08 + 0.25 * (y / h) ** 2)
+            c = dither(ramp, t, x // cell, y // cell)
+            if c != NIGHT:
+                for yy in range(y, y + cell - 1):  # a dot, with a 1px gap: the grid shows
+                    for xx in range(x, x + cell - 1):
+                        px[xx, yy] = c
+    m = scaled(mark(), 256)
+    img.alpha_composite(m, (1172, 92))
+    text(img, "DESKLINE", 110, 120, 14, INK)
+    text(img, "REMOTE DESKTOP WITH NO SERVER TO RUN", 112, 260, 4, INK)
+    text(img, "WINDOWS · MACOS · LINUX · END-TO-END ENCRYPTED", 112, 310, 3, rgb("#b2b2b2"))
+    return img
 
 
 def main():
     os.makedirs(ROOT, exist_ok=True)
-    mark(512).save(os.path.join(ROOT, "icon.png"))
+    art = mark()
+    scaled(art, 512).save(os.path.join(ROOT, "icon.png"))
     sizes = [16, 24, 32, 48, 64, 128, 256]
-    frames = [mark(s, simple=s < 48) for s in sizes]
+    frames = [scaled(art, s) for s in sizes]
     frames[-1].save(os.path.join(ROOT, "icon.ico"), sizes=[(s, s) for s in sizes], append_images=frames[:-1])
-    mark(64, simple=True).save(os.path.join(ROOT, "tray.png"))
-    mark(64, simple=True, alert=True).save(os.path.join(ROOT, "tray_alert.png"))
-    with open(os.path.join(ROOT, "banner.svg"), "w", encoding="utf-8") as f:
-        f.write(banner())
+    art.save(os.path.join(ROOT, "tray.png"))
+    mark(alert=True).save(os.path.join(ROOT, "tray_alert.png"))
+    banner().save(os.path.join(ROOT, "banner.png"))
+    old = os.path.join(ROOT, "banner.svg")
+    if os.path.exists(old):
+        os.remove(old)
     print("wrote", ", ".join(sorted(os.listdir(ROOT))))
 
 

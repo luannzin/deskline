@@ -137,6 +137,11 @@ jobs:
           xcrun notarytool submit dist/Deskline.dmg --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
             --password "$APPLE_APP_PASSWORD" --wait
           xcrun stapler staple dist/Deskline.dmg
+      # portable: the .app zipped, to unzip and run from anywhere (after notarizing, so the
+      # stapled ticket travels with it)
+      - name: macOS portable zip
+        if: runner.os == 'macOS'
+        run: ditto -c -k --keepParent dist/Deskline.app dist/Deskline-macos.zip
 
       - uses: actions/upload-artifact@v4
         with:
@@ -145,6 +150,7 @@ jobs:
             dist/*.deb
             dist/*.exe
             dist/*.dmg
+            dist/*.zip
             dist/deskline-linux-x86_64
           if-no-files-found: error
 
