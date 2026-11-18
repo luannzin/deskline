@@ -51,7 +51,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        # macos-15-intel, not macos-latest: GitHub's Apple Silicon runners are capacity-constrained
+        # and release jobs sat queued until GitHub dropped them; the Intel pool cross-builds the
+        # Apple Silicon half just as well. GitHub retires its Intel runners in 2027: switch back then.
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
         include:
           # Debian 12 = oldest glibc (2.36) and PipeWire (0.3.65, what the pipewire crate needs)
           # we support, so the .deb runs on Debian 12, Ubuntu 24.04 and newer.
