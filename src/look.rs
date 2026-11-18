@@ -19,7 +19,8 @@ pub const HOVER: Color32 = Color32::from_rgb(0x32, 0x32, 0x32);
 pub const PRESSED: Color32 = Color32::from_rgb(0x40, 0x40, 0x40);
 pub const INK: Color32 = Color32::from_rgb(0xf5, 0xf5, 0xf5);
 pub const SOFT: Color32 = Color32::from_rgb(0xb2, 0xb2, 0xb2);
-pub const MUTED: Color32 = Color32::from_rgb(0x81, 0x81, 0x81);
+/// 4.5:1 or better on the ground, the tile and the well.
+pub const MUTED: Color32 = Color32::from_rgb(0x88, 0x88, 0x88);
 /// Someone is in this computer.
 pub const RED: Color32 = Color32::from_rgb(0x9b, 0x2c, 0x2c);
 /// You have control.
@@ -31,6 +32,8 @@ const BAYER: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 
 /// One size for everything; hierarchy is weight and ink tier.
 pub const SIZE: f32 = 15.0;
+/// The code, the one thing on Home read aloud: Geist Mono, the only text above `SIZE`.
+const CODE: f32 = 24.0;
 const MEDIUM: &str = "medium";
 
 pub fn install(ctx: &egui::Context) {
@@ -61,10 +64,12 @@ pub fn install(ctx: &egui::Context) {
     w.noninteractive.bg_stroke = Stroke::new(1.0, HAIRLINE);
     w.noninteractive.fg_stroke = Stroke::new(1.0, SOFT);
     w.noninteractive.corner_radius = CornerRadius::same(6);
-    for (s, fill) in [(&mut w.inactive, RAISED), (&mut w.hovered, HOVER), (&mut w.active, PRESSED), (&mut w.open, HOVER)] {
+    // Pressed, or holding keyboard focus (egui draws both as active): an ink edge, so focus is
+    // plain to see on every egui widget.
+    for (s, fill, edge) in [(&mut w.inactive, RAISED, HAIRLINE), (&mut w.hovered, HOVER, PRESSED), (&mut w.active, PRESSED, INK), (&mut w.open, HOVER, PRESSED)] {
         (s.bg_fill, s.weak_bg_fill) = (fill, fill);
         s.fg_stroke = Stroke::new(1.0, INK);
-        s.bg_stroke = Stroke::new(1.0, if fill == RAISED { HAIRLINE } else { PRESSED });
+        s.bg_stroke = Stroke::new(1.0, edge);
         s.corner_radius = CornerRadius::same(6);
         s.expansion = 0.0;
     }
@@ -99,16 +104,56 @@ pub fn muted(text: impl Into<String>) -> RichText {
     RichText::new(text).color(MUTED)
 }
 
+/// Text that runs to more than a line: the explanations. Leading at about 1.5 so a paragraph
+/// reads as one.
+pub fn prose(text: impl Into<String>) -> RichText {
+    soft(text).line_height(Some(22.0))
+}
+
 /// The one filled button on a screen: paper ink, ground text.
 pub fn primary(ui: &mut Ui, text: impl Into<String>) -> Response {
-    let label = RichText::new(text).family(FontFamily::Name(MEDIUM.into())).color(GROUND);
-    ui.add(egui::Button::new(label).fill(INK).stroke(Stroke::NONE).min_size(vec2(0.0, 32.0)))
+    primary_enabled(ui, true, text)
 }
 
 pub fn primary_enabled(ui: &mut Ui, enabled: bool, text: impl Into<String>) -> Response {
     let label = RichText::new(text).family(FontFamily::Name(MEDIUM.into())).color(if enabled { GROUND } else { MUTED });
-    let fill = if enabled { INK } else { RAISED };
-    ui.add_enabled(enabled, egui::Button::new(label).fill(fill).stroke(Stroke::NONE).min_size(vec2(0.0, 32.0)))
+    let ink = [INK, Color32::from_gray(0xde), Color32::from_gray(0xc8)];
+    filled(ui, enabled, label, if enabled { ink } else { [RAISED; 3] }, INK)
+}
+
+/// The red bar's way out: white, in the bar's red.
+pub fn stop(ui: &mut Ui, text: impl Into<String>) -> Response {
+    let label = RichText::new(text).color(RED);
+    filled(ui, true, label, [Color32::WHITE, Color32::from_gray(0xe6), Color32::from_gray(0xd0)], Color32::WHITE)
+}
+
+/// The red bar's other buttons: white words on a veil of white.
+pub fn on_red(ui: &mut Ui, text: impl Into<String>) -> Response {
+    let veil = |a| Color32::from_white_alpha(a);
+    filled(ui, true, RichText::new(text).color(Color32::WHITE), [veil(28), veil(52), veil(76)], Color32::WHITE)
+}
+
+/// A filled button: `fills` at rest, under the pointer and pressed (or focused), no edge; with
+/// keyboard focus, a `ring` just outside it, since a darker fill alone is easy to miss.
+fn filled(ui: &mut Ui, enabled: bool, label: RichText, fills: [Color32; 3], ring: Color32) -> Response {
+    let r = ui
+        .scope(|ui| {
+            let w = &mut ui.visuals_mut().widgets;
+            for (s, fill) in [(&mut w.inactive, fills[0]), (&mut w.hovered, fills[1]), (&mut w.active, fills[2]), (&mut w.noninteractive, fills[0])] {
+                (s.weak_bg_fill, s.bg_stroke) = (fill, Stroke::NONE);
+            }
+            ui.add_enabled(enabled, egui::Button::new(label).min_size(vec2(0.0, 32.0)))
+        })
+        .inner;
+    if r.has_focus() {
+        focus_ring(ui, r.rect.expand(2.0), 8.0, ring, egui::StrokeKind::Outside);
+    }
+    r
+}
+
+/// Where keyboard focus is: a 2px ring.
+pub fn focus_ring(ui: &Ui, rect: Rect, radius: f32, color: Color32, kind: egui::StrokeKind) {
+    ui.painter().rect_stroke(rect, radius, Stroke::new(2.0, color), kind);
 }
 
 /// A button that is only text until the pointer is on it.
@@ -122,19 +167,35 @@ pub fn hairline(ui: &mut Ui) {
 }
 
 /// A row that lights up as a tile under the pointer, like luannzin.com's lists. The text stays
-/// in line with the column; the tile reaches 12px past it on both sides. Returns the row's own
-/// response (hover, click) beside what `add` returned.
-pub fn row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> (Response, R) {
-    let bg = ui.painter().add(Shape::Noop);
-    let inner = egui::Frame::new().inner_margin(Margin::symmetric(0, 8)).show(ui, |ui| {
+/// in line with the column; the tile reaches 12px past it on both sides. When `sense` takes
+/// clicks the whole tile is one target (buttons on the row still take their own clicks), and
+/// `Sense::click()` puts it in the Tab order too. Returns the row's response beside what `add`
+/// returned.
+pub fn row<R>(ui: &mut Ui, sense: Sense, add: impl FnOnce(&mut Ui) -> R) -> (Response, R) {
+    let click = sense.senses_click();
+    let tile = ui.available_rect_before_wrap().expand2(vec2(12.0, 0.0));
+    // Sensed before the row's own widgets are added, so they sit on top of it.
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(tile).sense(sense));
+    // Selectable text would take the click for itself.
+    child.style_mut().interaction.selectable_labels = !click;
+    let response = child.response();
+    let bg = child.painter().add(Shape::Noop);
+    let inner = egui::Frame::new().inner_margin(Margin::symmetric(12, 8)).show(&mut child, |ui| {
         ui.set_width(ui.available_width());
         add(ui)
     });
-    let rect = inner.response.rect.expand2(vec2(12.0, 0.0));
-    let response = ui.interact(rect, inner.response.id.with("row"), Sense::hover());
-    if response.hovered() {
-        ui.painter().set(bg, Shape::rect_filled(rect, 14.0, TILE));
+    let rect = inner.response.rect;
+    if child.rect_contains_pointer(rect) || response.has_focus() {
+        child.painter().set(bg, Shape::rect_filled(rect, 14.0, TILE));
     }
+    if response.has_focus() {
+        focus_ring(&child, rect, 14.0, INK, egui::StrokeKind::Inside);
+    }
+    if click && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    drop(child);
+    ui.advance_cursor_after_rect(rect.shrink2(vec2(12.0, 0.0)));
     (response, inner.inner)
 }
 
@@ -145,7 +206,7 @@ pub fn close(ui: &mut Ui) -> Response {
     let lit = response.hovered() || response.has_focus();
     let color = if lit { INK } else { MUTED };
     if response.has_focus() {
-        ui.painter().rect_stroke(rect, 6.0, Stroke::new(1.0, SOFT), egui::StrokeKind::Inside);
+        focus_ring(ui, rect, 6.0, INK, egui::StrokeKind::Inside);
     }
     let r = Rect::from_center_size(rect.center(), vec2(7.0, 7.0));
     let stroke = Stroke::new(1.5, color);
@@ -161,17 +222,15 @@ pub fn beside(ui: &Ui, label: &str) -> f32 {
     (ui.available_width() - text - 2.0 * s.button_padding.x - s.item_spacing.x).max(80.0)
 }
 
-/// This computer's code, big enough to read over the phone, in a well: three even lines (the 13
-/// groups go 5, 5, 3), never a lone group dangling at the end.
+/// This computer's code, big enough to read over the phone and set as type, not boxed: three
+/// even lines (the 13 groups go 5, 5, 3), never a lone group dangling at the end.
 pub fn code(ui: &mut Ui, code: &str) {
     let groups: Vec<&str> = code.split(' ').collect();
-    let lines: Vec<String> = groups.chunks(groups.len().div_ceil(3).max(1)).map(|c| c.join("  ")).collect();
-    egui::Frame::new().fill(WELL).corner_radius(14).inner_margin(Margin::symmetric(20, 16)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        for l in lines {
-            ui.label(RichText::new(l).monospace().size(20.0).color(INK));
-        }
-    });
+    let text = groups.chunks(groups.len().div_ceil(3).max(1)).map(|c| c.join("  ")).collect::<Vec<_>>().join("\n");
+    // Smaller only in a window too narrow for the lines at full size; a line never wraps.
+    let wide = ui.painter().layout_no_wrap(text.clone(), FontId::monospace(CODE), INK).size().x;
+    let size = (CODE * ui.available_width() / wide.max(1.0)).min(CODE).floor();
+    ui.label(RichText::new(text).monospace().size(size).color(INK));
 }
 
 /// Paint `rect` with 2px dots on a 3px grid; `at(column, row, columns, rows)` says each cell's
@@ -196,15 +255,6 @@ fn dots(ui: &Ui, rect: Rect, mut at: impl FnMut(usize, usize, usize, usize) -> O
 
 fn bayer(c: usize, r: usize) -> f32 {
     f32::from(BAYER[(r % 4) * 4 + c % 4]) / 16.0
-}
-
-/// luannzin.com's footer strip: the four colours of the dusk, each block denser than the last.
-pub fn strip(ui: &mut Ui, height: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-    dots(ui, rect, |c, r, cols, _| {
-        let block = (c * 4 / cols.max(1)).min(3);
-        (bayer(c, r) < (block + 1) as f32 / 4.0).then_some(DUSK[block])
-    });
 }
 
 /// How good the link between the two computers is, 0 to 1, from its kind and round trip.

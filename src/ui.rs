@@ -72,6 +72,8 @@ pub struct App {
     tab: Tab,
     form: Form,
     renaming: Option<(String, String)>,
+    /// The contact just forgotten and where it was, until Undo or the page changes.
+    forgotten: Option<(usize, settings::Contact)>,
     tray: Option<Tray>,
     hidden: bool,
     quitting: bool,
@@ -213,6 +215,7 @@ impl App {
             tab: if settings { Tab::Settings } else { Tab::Home },
             form: Form { relay, ..Default::default() },
             renaming: None,
+            forgotten: None,
             tray,
             hidden,
             quitting: false,
@@ -413,7 +416,8 @@ impl App {
         let frame = egui::Frame::new().fill(GROUND).inner_margin(egui::Margin::symmetric(16, 10));
         egui::Panel::top("tabs").frame(frame).show(ui, |ui| {
             ui.horizontal(|ui| {
-                if look::mark(ui, &self.mark, 32.0).interact(Sense::click()).clicked() {
+                // Pointer only: the Deskline tab beside it is the keyboard's way home.
+                if look::mark(ui, &self.mark, 32.0).interact(Sense::CLICK).clicked() {
                     self.tab = Tab::Home;
                 }
                 ui.add_space(4.0);
@@ -437,9 +441,10 @@ impl App {
         if let Some(id) = close {
             self.hang_up(ui.ctx(), id);
         }
-        // A note belongs to the page it was written on.
+        // A note, and an undo, belong to the page they were written on.
         if self.tab != before {
             self.note.clear();
+            self.forgotten = None;
         }
     }
 
@@ -454,17 +459,18 @@ impl App {
         }
     }
 
-    /// Home, one column: this computer's code for the person being helped, then the field for
-    /// the helper, then the computers you've reached before, and the dusk strip to close it.
+    /// Home, one column of type, nothing boxed: this computer's code for the person being
+    /// helped, then the field for the helper, then the computers you've reached before.
     fn home(&mut self, ui: &mut egui::Ui) {
-        column(ui, |ui| {
+        column(ui, "home", |ui| {
             ui.add_space(40.0);
             ui.label(strong(t("Your code")));
-            ui.label(soft(t("Send it to whoever is helping you. It never changes.")));
+            ui.label(look::prose(t("Send it to whoever is helping you. It never changes.")));
             ui.add_space(8.0);
             look::code(ui, &self.code);
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            // Wraps rather than push Change out of the window when the words run long.
+            ui.horizontal_wrapped(|ui| {
                 let now = ui.input(|i| i.time);
                 let copied = self.copied_at.is_some_and(|at| now - at < 2.0);
                 if copied {
@@ -476,7 +482,7 @@ impl App {
                 }
                 ui.add_space(8.0);
                 let state = if self.password_on { t("Unattended access is on") } else { t("Unattended access is off") };
-                ui.label(muted(state));
+                ui.add(egui::Label::new(muted(state)).extend());
                 if quiet(ui, t("Change")).clicked() {
                     self.tab = Tab::Settings;
                     self.note.clear();
@@ -496,7 +502,8 @@ impl App {
                 go = (clicked || (field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && ready;
             });
             if self.need_password {
-                let pw = TextEdit::singleline(&mut self.password).password(true).hint_text(t("Their unattended-access password"));
+                ui.label(soft(t("Their unattended-access password")));
+                let pw = TextEdit::singleline(&mut self.password).password(true);
                 let pw = ui.add(pw.desired_width(f32::INFINITY).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
                 go |= pw.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.partner.trim().is_empty();
                 ui.checkbox(&mut self.remember, t("Log in without the password next time"));
@@ -512,9 +519,7 @@ impl App {
             }
             self.update_row(ui);
             self.contacts(ui);
-            ui.add_space(56.0);
-            look::strip(ui, 24.0);
-            ui.add_space(24.0);
+            ui.add_space(40.0);
         });
     }
 
@@ -522,7 +527,7 @@ impl App {
         let Some(u) = self.updater.as_mut() else { return };
         let Some((tag, _)) = u.ready.clone() else { return };
         ui.add_space(16.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(soft(tf("Deskline {} is ready.", &[&tag])));
             let label = if u.installing { t("Updating…") } else { t("Restart to update") };
             if primary_enabled(ui, !u.installing, label).clicked() {
@@ -531,17 +536,22 @@ impl App {
         });
     }
 
+    /// The computers you've reached before. Connect, or click anywhere on the row; Forget can be
+    /// undone until you leave the page.
     fn contacts(&mut self, ui: &mut egui::Ui) {
         let contacts = self.store.get().contacts;
-        if contacts.is_empty() {
+        if contacts.is_empty() && self.forgotten.is_none() {
             return;
         }
         ui.add_space(40.0);
         ui.label(strong(t("Recent")));
         ui.add_space(4.0);
         let mut connect = None;
-        for c in &contacts {
-            look::row(ui, |ui| {
+        for (i, c) in contacts.iter().enumerate() {
+            let renaming = self.renaming.as_ref().is_some_and(|(id, _)| *id == c.id);
+            // The row takes the pointer; Connect on it is the keyboard's way in.
+            let sense = if renaming { Sense::hover() } else { Sense::CLICK };
+            let (row, _) = look::row(ui, sense, |ui| {
                 ui.horizontal(|ui| {
                     match self.renaming.as_mut().filter(|(id, _)| *id == c.id) {
                         Some((_, draft)) => {
@@ -570,15 +580,33 @@ impl App {
                         if quiet(ui, t("Forget")).clicked() {
                             let id = c.id.clone();
                             let _ = self.store.update(|s| s.contacts.retain(|x| x.id != id));
+                            self.forgotten = Some((i, c.clone()));
                         }
-                        if quiet(ui, t("Rename")).clicked() {
+                        if !renaming && quiet(ui, t("Rename")).clicked() {
                             self.renaming = Some((c.id.clone(), c.alias.clone().unwrap_or_default()));
                         }
-                        if ui.button(t("Connect")).clicked() {
+                        // Ink words, no frame until the pointer is on it: the row's action.
+                        if !renaming && ui.add(egui::Button::new(t("Connect")).frame_when_inactive(false)).clicked() {
                             connect = Some(c.id.clone());
                         }
                     });
-                });
+                })
+            });
+            if row.clicked() {
+                connect = Some(c.id.clone());
+            }
+        }
+        if let Some((i, c)) = self.forgotten.clone() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(soft(tf("{} is no longer in Recent.", &[c.label()])));
+                if quiet(ui, t("Undo")).clicked() {
+                    let _ = self.store.update(|s| {
+                        if !s.contacts.iter().any(|x| x.id == c.id) {
+                            s.contacts.insert(i.min(s.contacts.len()), c);
+                        }
+                    });
+                    self.forgotten = None;
+                }
             });
         }
         if let Some(id) = connect {
@@ -605,7 +633,7 @@ impl App {
 
     /// Settings, the same column: sections divided by hairlines, never boxed.
     fn settings(&mut self, ui: &mut egui::Ui) {
-        column(ui, |ui| {
+        column(ui, "settings", |ui| {
             ui.add_space(40.0);
             self.security(ui);
             ui.add_space(24.0);
@@ -629,7 +657,7 @@ impl App {
     /// Who gets in without a click. With the service, only an elevated window may change it.
     fn security(&mut self, ui: &mut egui::Ui) {
         ui.label(strong(t("Unattended access")));
-        ui.label(soft(t(
+        ui.label(look::prose(t(
             "With a password, people who know it can connect and control this computer when nobody is here to click Accept.",
         )));
         ui.add_space(8.0);
@@ -645,9 +673,14 @@ impl App {
             }
         } else {
             ui.label(muted(if self.password_on { t("A password is set. Set a new one to replace it.") } else { t("No password is set.") }));
-            ui.add(secret(&mut self.form.pw, t("New password (8 characters or more)")));
-            ui.add(secret(&mut self.form.pw2, t("Repeat it")));
-            ui.horizontal(|ui| {
+            // Labels stay above the fields: a hint would vanish at the first letter.
+            ui.add_space(4.0);
+            ui.label(soft(t("New password (8 characters or more)")));
+            ui.add(secret(&mut self.form.pw));
+            ui.label(soft(t("Repeat it")));
+            ui.add(secret(&mut self.form.pw2));
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
                 if primary(ui, t("Set password")).clicked() {
                     if self.form.pw.chars().count() < 8 {
                         self.form.error = t("Use at least 8 characters.");
@@ -672,7 +705,7 @@ impl App {
             ui.add_space(16.0);
             ui.label(strong(t("Always allowed")));
             for p in self.trusted.clone() {
-                look::row(ui, |ui| {
+                look::row(ui, Sense::hover(), |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new(&p.name).color(INK));
                         ui.label(muted(&p.id[..8]).monospace());
@@ -720,7 +753,7 @@ impl App {
         }
         #[cfg(windows)]
         if self.service {
-            ui.label(soft(t("Installed: Deskline starts with Windows and works at the sign-in screen.")));
+            ui.label(look::prose(t("Installed: Deskline starts with Windows and works at the sign-in screen.")));
             if quiet(ui, t("Uninstall")).clicked() {
                 std::thread::spawn(|| {
                     if service::elevate(&["--uninstall"]).is_ok() {
@@ -729,7 +762,7 @@ impl App {
                 });
             }
         } else {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.button(t("Install for all users")).clicked() {
                     self.install();
                 }
@@ -738,7 +771,7 @@ impl App {
         }
         ui.add_space(16.0);
         ui.label(strong(t("Relay server")));
-        ui.label(soft(t(
+        ui.label(look::prose(t(
             "Leave empty for the public relays. Your own: run iroh-relay and paste its URL. Restart Deskline after changing.",
         )));
         ui.horizontal(|ui| {
@@ -765,9 +798,11 @@ impl App {
         let mut cancel = false;
         let mut login = None;
         let v = &mut self.views[i];
-        ui.vertical_centered(|ui| {
+        let top = (ui.available_height() * 0.22).max(40.0);
+        // Scrolls when the password form doesn't fit a short window, so Cancel is never cut off.
+        ScrollArea::vertical().id_salt(("connecting", v.session.id)).auto_shrink(false).show(ui, |ui| ui.vertical_centered(|ui| {
             ui.set_max_width(360.0);
-            ui.add_space((ui.available_height() * 0.22).max(40.0));
+            ui.add_space(top);
             ui.label(strong(&v.status));
             ui.label(muted(&net::code(v.peer)[..19]).monospace());
             ui.add_space(16.0);
@@ -787,7 +822,8 @@ impl App {
                 ui.add_space(8.0);
             }
             cancel = quiet(ui, t("Cancel")).clicked();
-        });
+            ui.add_space(24.0);
+        }));
         if cancel || login.is_some() {
             let id = self.views[i].session.id;
             self.hang_up(ui.ctx(), id);
@@ -891,25 +927,27 @@ impl App {
             let frame = egui::Frame::new().fill(RED).inner_margin(egui::Margin::symmetric(16, 8));
             egui::Panel::top(Id::unique(("sharing", s.id))).frame(frame).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let what = if s.control { "{} sees and controls your screen" } else { "{} sees your screen" };
-                    ui.label(strong(tf(what, &[&s.who])).color(Color32::WHITE));
+                    // Buttons first, from the end; the sentence takes what's left and wraps,
+                    // so in a narrow window or a long language nothing runs under the buttons.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let stop = RichText::new(t("Stop sharing")).color(RED);
-                        if ui.add(egui::Button::new(stop).fill(Color32::WHITE).stroke(egui::Stroke::NONE)).clicked() {
+                        if look::stop(ui, t("Stop sharing")).clicked() {
                             cmds.push(HostCmd::Stop { id: s.id });
                         }
-                        let on_red = |text: String| egui::Button::new(RichText::new(text).color(Color32::WHITE)).fill(Color32::from_white_alpha(28)).stroke(egui::Stroke::NONE);
-                        if s.control && ui.add(on_red(t("Take back control"))).clicked() {
+                        if s.control && look::on_red(ui, t("Take back control")).clicked() {
                             cmds.push(HostCmd::AllowControl { id: s.id, yes: false });
                         }
-                        if !s.control && !s.asking && ui.add(on_red(t("Give control"))).clicked() {
+                        if !s.control && !s.asking && look::on_red(ui, t("Give control")).clicked() {
                             cmds.push(HostCmd::AllowControl { id: s.id, yes: true });
                         }
                         let chat = if s.chat.unread > 0 { format!("{}  {}", t("Chat"), s.chat.unread) } else { t("Chat") };
-                        if ui.add(on_red(chat)).clicked() {
+                        if look::on_red(ui, chat).clicked() {
                             s.chat.open = !s.chat.open;
                             s.chat.unread = 0;
                         }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            let what = if s.control { "{} sees and controls your screen" } else { "{} sees your screen" };
+                            ui.add(egui::Label::new(strong(tf(what, &[&s.who])).color(Color32::WHITE)).wrap());
+                        });
                     });
                 });
             });
@@ -963,10 +1001,12 @@ impl App {
             let frame = egui::Frame::new().fill(RED).inner_margin(egui::Margin::symmetric(16, 8));
             egui::CentralPanel::default().frame(frame).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(strong(line.clone()).color(Color32::WHITE));
+                    // The bar's height is fixed: a sentence too long for it ends in "…", whole on hover.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let label = RichText::new(t("Stop sharing")).color(RED);
-                        stop = ui.add(egui::Button::new(label).fill(Color32::WHITE).stroke(egui::Stroke::NONE)).clicked();
+                        stop = look::stop(ui, t("Stop sharing")).clicked();
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.add(egui::Label::new(strong(line.clone()).color(Color32::WHITE)).truncate());
+                        });
                     });
                 });
             });
@@ -984,11 +1024,11 @@ impl App {
         if let Some(r) = self.requests.first_mut() {
             let mut answer = None;
             Modal::new(Id::unique(("request", r.req))).frame(prompt_frame()).show(ctx, |ui| {
-                ui.set_width(380.0);
+                ui.set_width(prompt_width(ctx, 380.0));
                 ui.label(strong(t("Someone wants to see your screen")));
                 ui.add_space(12.0);
                 ui.label(RichText::new(&r.who).size(20.0).color(INK));
-                ui.label(soft(t("Only accept if you know who this is.")));
+                ui.label(look::prose(t("Only accept if you know who this is.")));
                 ui.add_space(16.0);
                 ui.checkbox(&mut r.control, t("Let them control (mouse, keyboard, clipboard, files)"));
                 ui.checkbox(&mut r.trust, t("Always allow them, even when I'm away"));
@@ -1011,11 +1051,11 @@ impl App {
         let Some(s) = self.shares.iter_mut().find(|s| s.asking) else { return };
         let mut answer = None;
         Modal::new(Id::unique(("control", s.id))).frame(prompt_frame()).show(ctx, |ui| {
-            ui.set_width(360.0);
+            ui.set_width(prompt_width(ctx, 360.0));
             ui.label(strong(t("Control request")));
             ui.add_space(12.0);
             ui.label(RichText::new(tf("{} wants to control your mouse and keyboard.", &[&s.who])).color(INK));
-            ui.label(soft(t("You can take control back at any time from the red bar.")));
+            ui.label(look::prose(t("You can take control back at any time from the red bar.")));
             ui.add_space(20.0);
             ui.horizontal(|ui| {
                 if primary(ui, t("Allow")).clicked() {
@@ -1093,10 +1133,13 @@ impl Viewing {
 }
 
 /// The session's bar: who, the link drawn as dusk with its kind and round trip, control, the
-/// session's tools, Disconnect at the end. A hairline under it.
+/// session's tools, Disconnect at the end. A hairline under it. The tools are words with no
+/// frame until the pointer is on them (or they're on); only Ask for control is filled.
 fn toolbar(ui: &mut egui::Ui, v: &mut Viewing, hang_up: &mut bool) {
     let frame = egui::Frame::new().fill(GROUND).inner_margin(egui::Margin::symmetric(16, 8)).stroke(egui::Stroke::new(1.0, HAIRLINE));
     egui::Panel::top("viewer").frame(frame).show(ui, |ui| {
+        let rest = &mut ui.visuals_mut().widgets.inactive;
+        (rest.bg_fill, rest.weak_bg_fill, rest.bg_stroke) = (Color32::TRANSPARENT, Color32::TRANSPARENT, egui::Stroke::NONE);
         ui.horizontal_wrapped(|ui| {
             ui.label(strong(v.who.as_deref().unwrap_or("…")));
             let (quality, text) = match v.link {
@@ -1104,7 +1147,16 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewing, hang_up: &mut bool) {
                 _ => (None, v.status.clone()),
             };
             look::link(ui, quality).on_hover_text(&text);
-            ui.label(muted(text));
+            match v.link {
+                // The round trip in mono: a measurement, and its digits don't shift the bar as it changes.
+                Some((kind, ms)) if v.status.is_empty() => {
+                    ui.label(muted(t(kind)));
+                    ui.label(muted(format!("{ms} ms")).monospace());
+                }
+                _ => {
+                    ui.label(muted(text));
+                }
+            }
             ui.add_space(8.0);
             match v.control {
                 Control::Off => {
@@ -1183,35 +1235,42 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewing, hang_up: &mut bool) {
 fn tab(ui: &mut egui::Ui, current: &mut Tab, this: Tab, label: String) {
     let on = *current == this;
     let text = if on { strong(label) } else { soft(label) };
-    let r = ui.add(egui::Label::new(text).sense(Sense::click()));
+    let r = ui.add(egui::Label::new(text).selectable(false).sense(Sense::click()));
     if on {
         let y = r.rect.bottom() + 6.0;
         ui.painter().hline(r.rect.x_range(), y, egui::Stroke::new(1.0, INK));
     } else if r.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+    if r.has_focus() {
+        look::focus_ring(ui, r.rect.expand2(vec2(6.0, 4.0)), 6.0, INK, egui::StrokeKind::Outside);
+    }
     if r.clicked() {
         *current = this;
     }
 }
 
-/// luannzin.com's reading column: centred, left-aligned inside, scrolling as a whole.
-fn column(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
-    ScrollArea::vertical().show(ui, |ui| {
-        let side = ((ui.available_width() - COLUMN) / 2.0).max(16.0);
-        ui.horizontal(|ui| {
-            ui.add_space(side);
-            ui.vertical(|ui| {
-                ui.set_max_width(COLUMN.min(ui.available_width() - 16.0));
-                add(ui);
-            });
-        });
+/// luannzin.com's reading column: centred, left-aligned inside, 16px from the window's edges at
+/// the narrowest. The whole window scrolls it, margins included, with the bar at the window's
+/// edge; each page (`id`) keeps its own place.
+fn column(ui: &mut egui::Ui, id: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ScrollArea::vertical().id_salt(id).auto_shrink(false).show(ui, |ui| {
+        let mut rect = ui.max_rect();
+        let width = COLUMN.min(rect.width() - 32.0);
+        rect.min.x += (rect.width() - width) / 2.0;
+        rect.max.x = rect.min.x + width;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect), add);
     });
 }
 
 /// A password field at the interface's height.
-fn secret(s: &mut String, hint: String) -> TextEdit<'_> {
-    TextEdit::singleline(s).password(true).hint_text(hint).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER)
+fn secret(s: &mut String) -> TextEdit<'_> {
+    TextEdit::singleline(s).password(true).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER)
+}
+
+/// A prompt's width, narrower when the window is (small, or zoomed in): never cut off.
+fn prompt_width(ctx: &egui::Context, width: f32) -> f32 {
+    width.min(ctx.content_rect().width() - 2.0 * (24.0 + 16.0)).max(160.0)
 }
 
 fn prompt_frame() -> egui::Frame {
@@ -1309,15 +1368,17 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
         let here = if listing.path.is_empty() { t("Their computer") } else { listing.path.clone() };
         ui.label(strong(here));
     });
-    ScrollArea::vertical().show(ui, |ui| {
+    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        if listing.entries.is_empty() {
+            ui.label(soft(t("This folder is empty.")));
+        }
         for e in &listing.entries {
             let path = listing.path_of(e);
-            look::row(ui, |ui| {
+            // A folder row opens the folder, by pointer or by Tab and Enter.
+            let (row, _) = look::row(ui, if e.dir { Sense::click() } else { Sense::hover() }, |ui| {
                 ui.horizontal(|ui| {
                     if e.dir {
-                        if ui.add(egui::Label::new(RichText::new(format!("{}/", e.name)).color(INK)).sense(Sense::click())).clicked() {
-                            v.session.cmd(Cmd::List(path.clone()));
-                        }
+                        ui.label(RichText::new(format!("{}/", e.name)).color(INK));
                     } else {
                         ui.label(RichText::new(&e.name).color(INK));
                         ui.label(muted(size(e.size)));
@@ -1327,8 +1388,11 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
                             v.session.cmd(Cmd::Download(path.clone()));
                         }
                     });
-                });
+                })
             });
+            if row.clicked() {
+                v.session.cmd(Cmd::List(path));
+            }
         }
     });
 }
