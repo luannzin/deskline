@@ -12,6 +12,12 @@ use tokio::sync::watch;
 #[cfg_attr(test, path = "fake.rs")]
 pub(crate) mod imp;
 
+/// Tests use the fake screen, so the Linux backend's own unit tests need it compiled beside it.
+#[cfg(all(test, target_os = "linux"))]
+#[allow(dead_code)]
+#[path = "linux.rs"]
+mod linux;
+
 /// One captured frame, 4 bytes per pixel, rows packed with no padding.
 pub struct Frame {
     pub w: usize,
