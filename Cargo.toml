@@ -8,6 +8,14 @@ description = "Remote desktop with no server: share a code, accept, see and cont
 
 [dependencies]
 anyhow = "1"
+# Clipboard sync. On Linux the data-control protocol lets a window that doesn't have focus see
+# changes (KDE, wlroots; GNOME falls back to X11/XWayland).
+arboard = "3.7"
+# The unattended-access password is stored as an Argon2 hash.
+argon2 = "0.6"
+# Native file pickers for file transfer (xdg portal on Linux, no GTK).
+rfd = "0.18"
+serde_json = "1"
 # glow (OpenGL) instead of wgpu: smaller binary, faster build, runs on old GPUs and VMs.
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
 iroh = "1.4"
@@ -16,7 +24,7 @@ iroh-mdns-address-lookup = "0.6"
 openh264 = "0.9"
 postcard = { version = "1", features = ["use-std"] }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
 
 # Linux: the xdg RemoteDesktop portal (Wayland and X11 desktops that ship it) and PipeWire for
 # the frames. Building needs libpipewire-0.3-dev and libclang-dev.
@@ -32,6 +40,9 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Pipes",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 

@@ -34,3 +34,6 @@ pub fn run_in_service(_dir: PathBuf) {}
 
 /// Start the newly installed version after `Installed`.
 pub fn relaunch() {}
+
+/// Remove what a previous update left behind.
+pub fn cleanup() {}
