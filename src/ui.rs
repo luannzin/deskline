@@ -63,6 +63,7 @@ fn theme(ctx: &egui::Context) {
     (v.panel_fill, v.window_fill, v.faint_bg_color, v.extreme_bg_color, v.code_bg_color) = (GROUND, TILE, TILE, WELL, WELL);
     v.window_stroke = egui::Stroke::new(1.0, HAIRLINE);
     v.hyperlink_color = INK;
+    v.weak_text_color = Some(MUTED);
     v.selection.bg_fill = PRESSED;
     v.selection.stroke = egui::Stroke::new(1.0, INK);
     let w = &mut v.widgets;
