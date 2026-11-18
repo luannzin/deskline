@@ -169,6 +169,14 @@ impl App {
         });
         let (view_tx, view_events) = mpsc::unbounded_channel();
         let relay = store.get().relay.unwrap_or_default();
+        let tray = if service { None } else { Tray::start(&ctx) };
+        // Started in the background with no tray to come back from (GNOME without the
+        // AppIndicator extension, or the service's window): minimized instead of invisible.
+        let hidden = background && (tray.is_some() || service);
+        if background && !hidden {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+        }
         Self {
             name: net::whoami(),
             code: net::code(ep.id()),
@@ -193,8 +201,8 @@ impl App {
             tab: if settings { Tab::Settings } else { Tab::Home },
             form: Form { relay, ..Default::default() },
             renaming: None,
-            tray: if service { None } else { Tray::start(&ctx) },
-            hidden: background,
+            tray,
+            hidden,
             quitting: false,
             updater: (!service).then(|| Updater::start(home.join("update"))),
             #[cfg(windows)]
