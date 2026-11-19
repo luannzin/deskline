@@ -47,11 +47,6 @@ pub fn grab(on: bool) {
     GRAB.store(on, Ordering::SeqCst);
 }
 
-/// Whether the hook is installed and grabbing right now.
-pub fn grabbing() -> bool {
-    INSTALLED.load(Ordering::SeqCst) && GRAB.load(Ordering::SeqCst)
-}
-
 unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let k = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };

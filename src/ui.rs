@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align, Color32, Event as UiEvent, Id, Key, Layout, Modal, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, RichText,
-    ScrollArea, Sense, TextEdit, TextureHandle, TextureOptions, Vec2, ViewportCommand, scroll_area::ScrollSource, vec2,
+    self, Align, Color32, CursorGrab, Event as UiEvent, Id, Key, Layout, Modal, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect,
+    RichText, ScrollArea, Sense, TextEdit, TextureHandle, TextureOptions, Vec2, ViewportCommand, scroll_area::ScrollSource, vec2,
 };
 use iroh::{Endpoint, EndpointId};
 use tokio::sync::mpsc;
@@ -44,6 +44,12 @@ pub struct Start {
 
 /// The reading column, like luannzin.com's.
 const COLUMN: f32 = 560.0;
+/// Every picture setting, in the order they're offered.
+const QUALITIES: [Quality; 4] = [Quality::Balanced, Quality::Sharp, Quality::Smooth, Quality::Gaming];
+/// The evdev code of Z: Ctrl+Alt+Shift+Z gives a captured mouse back (the Windows keyboard hook
+/// sees codes; egui sees `Key::Z`).
+#[cfg(windows)]
+const RELEASE_KEY: u16 = 44;
 
 pub struct App {
     ep: Endpoint,
@@ -80,8 +86,13 @@ pub struct App {
     updater: Option<Updater>,
     /// The pixel-art mark, drawn with nearest-neighbour so it stays crisp.
     mark: TextureHandle,
+    /// The mouse is held by the window for a viewer (`Viewing::captured`) right now.
+    grabbed: bool,
     #[cfg(windows)]
     keys: std::sync::mpsc::Receiver<(u16, bool)>,
+    /// Ctrl, Alt and Shift as the keyboard hook saw them (bits 1, 2, 4).
+    #[cfg(windows)]
+    hook_mods: u8,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -137,8 +148,14 @@ struct Viewing {
     link: Option<(&'static str, u32)>,
     control: Control,
     tex: Option<TextureHandle>,
+    /// Pictures shown in the last second.
+    fps: u32,
     mods: Modifiers,
     scroll: Vec2,
+    /// The mouse moves their pointer by raw counts (for games), since this time.
+    captured: Option<f64>,
+    /// Movement under one count, kept for the next.
+    motion: Vec2,
     monitors: Vec<Monitor>,
     current: usize,
     privacy: bool,
@@ -225,8 +242,11 @@ impl App {
                 let size = [img.width() as usize, img.height() as usize];
                 ctx.load_texture("mark", egui::ColorImage::from_rgba_unmultiplied(size, &img), TextureOptions::NEAREST)
             },
+            grabbed: false,
             #[cfg(windows)]
             keys: keyhook::start(ctx),
+            #[cfg(windows)]
+            hook_mods: 0,
         };
         if let Some((code, password)) = connect {
             app.partner = code.clone();
@@ -326,10 +346,13 @@ impl App {
                     v.note(&t("They said no to control."));
                 }
                 v.control = if on { Control::On } else { Control::Off };
+                if !on {
+                    v.captured = None;
+                }
             }
             ViewEvent::Monitors { list, current } => (v.monitors, v.current) = (list, current),
-            ViewEvent::Link { kind, ms } => {
-                v.link = Some((kind, ms));
+            ViewEvent::Link { kind, ms, fps } => {
+                (v.link, v.fps) = (Some((kind, ms)), fps);
                 v.status.clear();
             }
             ViewEvent::Chat(text) => {
@@ -387,8 +410,11 @@ impl App {
             link: None,
             control: Control::Off,
             tex: None,
+            fps: 0,
             mods: Modifiers::NONE,
             scroll: Vec2::ZERO,
+            captured: None,
+            motion: Vec2::ZERO,
             monitors: Vec::new(),
             current: 0,
             privacy: false,
@@ -728,10 +754,10 @@ impl App {
         ui.checkbox(&mut s.allow_control, t("When I accept someone, let them control by default"));
         ui.checkbox(&mut s.sound, t("Hear the other computer's sound"));
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(soft(t("Picture")));
             ui.add_space(8.0);
-            for q in [Quality::Balanced, Quality::Sharp, Quality::Smooth] {
+            for q in QUALITIES {
                 ui.selectable_value(&mut s.quality, q, quality_name(q));
             }
         });
@@ -833,7 +859,7 @@ impl App {
         }
     }
 
-    fn viewer(&mut self, ui: &mut egui::Ui, i: usize, grabbing: bool) {
+    fn viewer(&mut self, ui: &mut egui::Ui, i: usize) {
         let mut hang_up = false;
         let picked = self.picked.0.clone();
         let v = &mut self.views[i];
@@ -891,7 +917,7 @@ impl App {
                     let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
                     ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
                     if control {
-                        forward_input(ui, v, rect, response.hovered(), grabbing);
+                        forward_input(ui, v, rect, response.hovered());
                     }
                 });
             } else {
@@ -901,15 +927,19 @@ impl App {
                 let rect = Rect::from_center_size(area.center(), size * scale);
                 ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
                 if control {
-                    forward_input(ui, v, rect, response.hovered(), grabbing);
+                    forward_input(ui, v, rect, response.hovered());
                 }
             }
             if !v.status.is_empty() {
-                // Reconnecting: say so over the frozen picture, on a plate so it reads on anything.
-                let galley = ui.painter().layout_no_wrap(v.status.clone(), egui::FontId::proportional(look::SIZE), INK);
-                let plate = Rect::from_center_size(area.center_top() + vec2(0.0, 40.0), galley.size() + vec2(32.0, 16.0));
-                ui.painter().rect_filled(plate, 10.0, Color32::from_black_alpha(200));
-                ui.painter().galley(plate.center() - galley.size() / 2.0, galley, INK);
+                // Reconnecting: say so over the frozen picture.
+                plate(ui, area, v.status.clone());
+            } else if let Some(at) = v.captured {
+                // The way out of a captured mouse, for its first seconds.
+                let left = 3.0 - (ui.input(|i| i.time) - at);
+                if left > 0.0 {
+                    plate(ui, area, t("Ctrl+Alt+Shift+Z gives the mouse back"));
+                    ui.ctx().request_repaint_after(Duration::from_secs_f64(left));
+                }
             }
         });
 
@@ -938,6 +968,12 @@ impl App {
                         }
                         if !s.control && !s.asking && look::on_red(ui, t("Give control")).clicked() {
                             cmds.push(HostCmd::AllowControl { id: s.id, yes: true });
+                        }
+                        // The portal's answer (which screens, remote interaction) can change.
+                        if cfg!(target_os = "linux")
+                            && look::on_red(ui, t("Choose screens")).on_hover_text(t("Pick again what they see, and whether they may control")).clicked()
+                        {
+                            cmds.push(HostCmd::Reshare);
                         }
                         let chat = if s.chat.unread > 0 { format!("{}  {}", t("Chat"), s.chat.unread) } else { t("Chat") };
                         if look::on_red(ui, chat).clicked() {
@@ -1152,6 +1188,9 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewing, hang_up: &mut bool) {
                 Some((kind, ms)) if v.status.is_empty() => {
                     ui.label(muted(t(kind)));
                     ui.label(muted(format!("{ms} ms")).monospace());
+                    if v.fps > 0 {
+                        ui.label(muted(format!("{} fps", v.fps)).monospace());
+                    }
                 }
                 _ => {
                     ui.label(muted(text));
@@ -1176,23 +1215,34 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewing, hang_up: &mut bool) {
                     if ui.selectable_label(v.privacy, t("Privacy")).on_hover_text(t("Blank their screen and lock their own mouse and keyboard")).clicked() {
                         v.session.send(Ask::Privacy(!v.privacy));
                     }
+                    let hint = t("For games: your mouse moves theirs directly. Ctrl+Alt+Shift+Z gives it back.");
+                    if ui.selectable_label(v.captured.is_some(), t("Capture mouse")).on_hover_text(hint).clicked() {
+                        v.captured = if v.captured.is_some() { None } else { Some(ui.input(|i| i.time)) };
+                    }
                 }
             }
-            if v.monitors.len() > 1 {
+            // Always there, even with one screen: the system may share fewer than they have.
+            if !v.monitors.is_empty() {
                 let current = v.monitors.get(v.current).map_or(t("Screen"), |m| m.name.clone());
                 let mut pick = v.current;
+                let mut other = false;
                 egui::ComboBox::from_id_salt("monitor").selected_text(current).show_ui(ui, |ui| {
                     for (n, m) in v.monitors.iter().enumerate() {
                         ui.selectable_value(&mut pick, n, format!("{}  {}×{}", m.name, m.w, m.h));
                     }
+                    other = ui.selectable_label(false, t("Other screens…")).on_hover_text(t("Asks their computer to choose again what it shares")).clicked();
                 });
                 if pick != v.current {
                     v.session.send(Ask::Monitor(pick));
                 }
+                if other {
+                    v.session.send(Ask::Reshare);
+                    v.note(&t("Asked them to choose again what they share."));
+                }
             }
             let mut q = v.quality;
             egui::ComboBox::from_id_salt("quality").selected_text(quality_name(q)).show_ui(ui, |ui| {
-                for x in [Quality::Balanced, Quality::Sharp, Quality::Smooth] {
+                for x in QUALITIES {
                     ui.selectable_value(&mut q, x, quality_name(x));
                 }
             });
@@ -1229,6 +1279,14 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewing, hang_up: &mut bool) {
             ui.label(muted(n));
         }
     });
+}
+
+/// A line over the picture near its top, on a dark plate so it reads on anything.
+fn plate(ui: &egui::Ui, area: Rect, text: String) {
+    let galley = ui.painter().layout_no_wrap(text, egui::FontId::proportional(look::SIZE), INK);
+    let plate = Rect::from_center_size(area.center_top() + vec2(0.0, 40.0), galley.size() + vec2(32.0, 16.0));
+    ui.painter().rect_filled(plate, 10.0, Color32::from_black_alpha(200));
+    ui.painter().galley(plate.center() - galley.size() / 2.0, galley, INK);
 }
 
 /// A tab: ink with a hairline under it when it's the current one, soft otherwise.
@@ -1282,6 +1340,7 @@ fn quality_name(q: Quality) -> String {
         Quality::Balanced => "Balanced",
         Quality::Sharp => "Sharp text",
         Quality::Smooth => "Slow connection",
+        Quality::Gaming => "Gaming (120 fps)",
     })
 }
 
@@ -1406,9 +1465,11 @@ fn size(n: u64) -> String {
     }
 }
 
-/// Mouse over the picture and every key goes to the other screen. With the Windows keyboard
-/// hook grabbing, keys come from the hook instead (Win, Alt+Tab and friends included).
-fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool, grabbing: bool) {
+/// Mouse over the picture and every key goes to the other screen. On Windows the keyboard hook
+/// takes most keys first (Win, Alt+Tab and friends included) and egui never sees those; the rest
+/// come through here. Windows silently drops a hook that answers slowly once, and then this is
+/// how keys still get there.
+fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool) {
     // Keep buttons from taking focus, or Space/Enter would press them instead of reaching the remote.
     if v.panel != Panel::Chat {
         ui.memory_mut(|m| {
@@ -1424,21 +1485,28 @@ fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool, 
     };
     let key = |code: u16, down: bool| Ask::Input(Input::Key { code, down });
     let typing = v.panel == Panel::Chat && ui.memory(|m| m.focused().is_some());
+    let captured = v.captured.is_some();
     for e in ui.input(|i| i.events.clone()) {
         match e {
+            // Captured, the mouse's raw counts move their pointer, wherever ours is: games turn
+            // the camera with them and hide the pointer.
+            UiEvent::MouseMoved(d) if captured => v.motion += d,
+            UiEvent::PointerMoved(_) if captured => {}
+            UiEvent::PointerButton { button, pressed, .. } if captured => {
+                send_motion(&v.session, &mut v.motion);
+                send(Input::Button { button: button_number(button), down: pressed });
+            }
+            UiEvent::Key { physical_key, key: k, pressed: true, modifiers: m, .. }
+                if captured && m.ctrl && m.alt && m.shift && physical_key.unwrap_or(k) == Key::Z =>
+            {
+                v.captured = None;
+            }
             UiEvent::PointerMoved(p) if rect.contains(p) => send(at(p)),
             UiEvent::PointerButton { pos, button, pressed, .. } if rect.contains(pos) || !pressed => {
-                let button = match button {
-                    PointerButton::Primary => 0,
-                    PointerButton::Secondary => 1,
-                    PointerButton::Middle => 2,
-                    PointerButton::Extra1 => 3,
-                    PointerButton::Extra2 => 4,
-                };
                 send(at(pos));
-                send(Input::Button { button, down: pressed });
+                send(Input::Button { button: button_number(button), down: pressed });
             }
-            UiEvent::MouseWheel { unit, delta, .. } if hovered => {
+            UiEvent::MouseWheel { unit, delta, .. } if hovered || captured => {
                 let per_notch = match unit {
                     MouseWheelUnit::Line => 1.0,
                     MouseWheelUnit::Point => 1.0 / 50.0,
@@ -1451,7 +1519,7 @@ fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool, 
                     send(Input::Scroll { x: -steps.x as i32, y: steps.y as i32 });
                 }
             }
-            _ if grabbing || typing => {}
+            _ if typing => {}
             UiEvent::Key { key: k, physical_key, pressed, .. } => {
                 if let Some(code) = desktop::evdev(physical_key.unwrap_or(k)) {
                     v.session.send(key(code, pressed));
@@ -1479,6 +1547,28 @@ fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool, 
             }
             _ => {}
         }
+    }
+    // One message for all of this frame's movement: a fast mouse reports a thousand times a second.
+    send_motion(&v.session, &mut v.motion);
+}
+
+/// The whole counts of `motion` go out; the fraction waits for more.
+fn send_motion(session: &View, motion: &mut Vec2) {
+    let step = Vec2::new(motion.x.trunc(), motion.y.trunc());
+    if step != Vec2::ZERO {
+        *motion -= step;
+        session.send(Ask::Input(Input::MoveBy { dx: step.x as i32, dy: step.y as i32 }));
+    }
+}
+
+/// `Input::Button`'s numbering.
+fn button_number(b: PointerButton) -> u8 {
+    match b {
+        PointerButton::Primary => 0,
+        PointerButton::Secondary => 1,
+        PointerButton::Middle => 2,
+        PointerButton::Extra1 => 3,
+        PointerButton::Extra2 => 4,
     }
 }
 
@@ -1515,21 +1605,50 @@ impl eframe::App for App {
         let want = current.is_some_and(|i| self.views[i].control == Control::On && self.views[i].panel != Panel::Chat)
             && ctx.input(|i| i.focused);
         #[cfg(windows)]
-        let grabbing = {
+        {
             keyhook::grab(want);
-            let grabbing = keyhook::grabbing();
             while let Ok((code, down)) = self.keys.try_recv() {
-                if let (true, Some(i)) = (grabbing, current) {
-                    self.views[i].session.send(Ask::Input(Input::Key { code, down }));
+                // The hook takes the keys before egui sees them, so it watches for Ctrl+Alt+Shift+Z itself.
+                let bit = match code {
+                    CTRL | 97 => 1,
+                    ALT | 100 => 2,
+                    SHIFT | 54 => 4,
+                    _ => 0,
+                };
+                if down {
+                    self.hook_mods |= bit;
+                } else {
+                    self.hook_mods &= !bit;
+                }
+                // The hook only takes keys meant for the screen in front, and the releases of those
+                // even once the grab has ended: all of them go, or a key stays down over there.
+                if let Some(i) = current {
+                    let v = &mut self.views[i];
+                    if down && code == RELEASE_KEY && self.hook_mods == 7 && v.captured.is_some() {
+                        v.captured = None;
+                        continue;
+                    }
+                    v.session.send(Ask::Input(Input::Key { code, down }));
                 }
             }
-            grabbing
-        };
+        }
         #[cfg(not(windows))]
-        let grabbing = {
-            let _ = want;
-            false
-        };
+        let _ = want;
+
+        // A captured mouse stays with the window only while its screen is in front, controlled
+        // and focused; anything else gives it back.
+        let capture = current.is_some_and(|i| {
+            let v = &self.views[i];
+            v.captured.is_some() && v.control == Control::On && v.panel != Panel::Chat
+        }) && ctx.input(|i| i.focused);
+        if capture != self.grabbed {
+            self.grabbed = capture;
+            // Raw movement arrives either way. macOS can only lock the pointer in place, and X11
+            // and Windows can only keep it in the window (asking them to lock drops the grab).
+            let mode = if cfg!(target_os = "macos") { CursorGrab::Locked } else { CursorGrab::Confined };
+            ctx.send_viewport_cmd(ViewportCommand::CursorGrab(if capture { mode } else { CursorGrab::None }));
+            ctx.send_viewport_cmd(ViewportCommand::CursorVisible(!capture));
+        }
 
         if !fullscreen {
             self.tabs(ui);
@@ -1539,7 +1658,7 @@ impl eframe::App for App {
             (Tab::Settings, _) => {
                 egui::CentralPanel::default().show(ui, |ui| self.settings(ui));
             }
-            (Tab::View(_), Some(i)) if self.views[i].who.is_some() => self.viewer(ui, i, grabbing),
+            (Tab::View(_), Some(i)) if self.views[i].who.is_some() => self.viewer(ui, i),
             (Tab::View(_), Some(i)) => {
                 egui::CentralPanel::default().show(ui, |ui| self.connecting(ui, i));
             }

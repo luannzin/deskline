@@ -11,7 +11,7 @@ use openh264::formats::{BgraSliceU8, RgbaSliceU8, YUVBuffer, YUVSource};
 use openh264_sys2::{ENCODER_OPTION_BITRATE, ENCODER_OPTION_MAX_BITRATE, SBitrateInfo, SPATIAL_LAYER_0, SPATIAL_LAYER_ALL};
 use serde::{Deserialize, Serialize};
 
-use crate::desktop::Frame;
+use crate::desktop::{DEFAULT_FPS, Frame};
 
 #[cfg(windows)]
 mod mf;
@@ -24,10 +24,13 @@ const STEP: (u64, u64) = (2, 3);
 const STEP_PIXELS: f64 = 2.25;
 /// No step goes below this long side: smaller is too blurry to work with.
 const MIN_LONG: u64 = 640;
-/// Average encode time per frame (ms) above which this computer can't hold 30 fps at a size.
-const SLOW_MS: f64 = 28.0;
-/// Step back up only when the bigger size should take less than this.
-const ROOM_MS: f64 = 18.0;
+/// Average encode time, as a share of the time one frame has, above which this computer can't
+/// hold the frame rate at a size (28 ms at 30 fps).
+const SLOW: f64 = 0.85;
+/// Step back up only when the bigger size should take less than this share (18 ms at 30 fps).
+const ROOM: f64 = 0.55;
+/// H.264 level 5.2's macroblocks a second, the most OpenH264 encodes: 4K stops at 64 fps.
+const MAX_MBPS: u64 = 2_073_600;
 /// Rates at or below `NET_DOWN` of the top bitrate step the picture down; it steps back up at
 /// `NET_UP`. The gap keeps it from flipping.
 const NET_DOWN: f32 = 0.35;
@@ -43,6 +46,9 @@ pub enum Quality {
     Sharp,
     /// Smaller picture, fewer bits: for slow links.
     Smooth,
+    /// Up to 4K at up to 120 fps, many bits: games and video. Keeps the frame rate and gives
+    /// up size first. New in 0.5: added last, so older versions skip it.
+    Gaming,
 }
 
 impl Quality {
@@ -52,7 +58,18 @@ impl Quality {
             Quality::Balanced => (1920, 2.0),
             Quality::Sharp => (MAX_LONG, 3.0),
             Quality::Smooth => (1280, 1.0),
+            Quality::Gaming => (MAX_LONG, 6.0),
         }
+    }
+
+    /// The most frames a second it sends.
+    pub fn fps(self) -> u32 {
+        if self == Quality::Gaming { 120 } else { DEFAULT_FPS }
+    }
+
+    /// No step goes below this long side. A game at 480p isn't playable at any frame rate.
+    fn min_long(self) -> u64 {
+        if self == Quality::Gaming { 1280 } else { MIN_LONG }
     }
 }
 
@@ -70,6 +87,8 @@ pub struct Encoder {
     pace: Pace,
     scaler: Option<Scaler>,
     scratch: Vec<u8>,
+    /// The last picture's planes, reused while the size holds.
+    yuv: Option<YUVBuffer>,
 }
 
 /// The running encoder and what it was opened with.
@@ -78,6 +97,7 @@ struct Stream {
     w: usize,
     h: usize,
     bps: u32,
+    fps: u32,
 }
 
 enum Backend {
@@ -116,7 +136,13 @@ impl Encoder {
             pace: Pace { since: Instant::now(), frames: 0, busy: Duration::ZERO, calm: 0, up_after: 3 },
             scaler: None,
             scratch: Vec::new(),
+            yuv: None,
         }
+    }
+
+    /// The most frames a second the quality asks for.
+    pub fn fps(&self) -> u32 {
+        self.quality.fps()
     }
 
     /// Takes effect on the next frame. A new size starts a new stream.
@@ -156,11 +182,11 @@ impl Encoder {
         let started = Instant::now();
         let (w, h) = fit(f.w, f.h, self.quality, self.steps());
         anyhow::ensure!(w >= 16 && h >= 16, "frame too small: {}x{}", f.w, f.h);
-        let yuv = to_yuv(f, w, h, &mut self.scaler, &mut self.scratch);
         let bps = self.bitrate(f);
+        let fps = self.quality.fps();
 
         let mut restart = match &mut self.stream {
-            Some(s) if (s.w, s.h) == (w, h) => {
+            Some(s) if (s.w, s.h, s.fps) == (w, h, fps) => {
                 let change = (bps as f64 / s.bps as f64 - 1.0).abs();
                 if change >= 0.05 && s.enc.set_bitrate(bps, s.bps) {
                     s.bps = bps;
@@ -172,17 +198,19 @@ impl Encoder {
         };
         if restart {
             self.stream = None;
-            self.stream = Some(self.open(w, h, bps)?);
+            self.stream = Some(self.open(w, h, bps, fps)?);
         }
-        let mut out = self.stream.as_mut().expect("opened above").enc.encode(&yuv, key);
+        let yuv = to_yuv(f, w, h, &mut self.scaler, &mut self.scratch, &mut self.yuv);
+        let mut out = self.stream.as_mut().expect("opened above").enc.encode(yuv, key);
         if let Err(e) = &out
             && self.hardware()
         {
             eprintln!("deskline: the hardware encoder failed, using OpenH264 from now on: {e:#}");
             self.no_hw = true;
             self.stream = None;
-            self.stream = Some(self.open(w, h, bps)?);
-            out = self.stream.as_mut().expect("just opened").enc.encode(&yuv, true);
+            self.stream = Some(self.open(w, h, bps, fps)?);
+            let yuv = self.yuv.as_ref().expect("filled above");
+            out = self.stream.as_mut().expect("just opened").enc.encode(yuv, true);
             restart = true;
         }
         // Opening an encoder (and checking a hardware one) isn't what a frame costs.
@@ -203,11 +231,11 @@ impl Encoder {
         ((w * h) as f64 * self.quality.preset().1 * self.rate as f64).max(10_000.0) as u32
     }
 
-    fn open(&mut self, w: usize, h: usize, bps: u32) -> anyhow::Result<Stream> {
+    fn open(&mut self, w: usize, h: usize, bps: u32, fps: u32) -> anyhow::Result<Stream> {
         #[cfg(windows)]
         if !self.no_hw {
-            match mf::Encoder::new(w, h, bps) {
-                Ok(enc) => return Ok(Stream { enc: Backend::Hard(enc, Some(Decoder::new()?)), w, h, bps }),
+            match mf::Encoder::new(w, h, bps, fps) {
+                Ok(enc) => return Ok(Stream { enc: Backend::Hard(enc, Some(Decoder::new()?)), w, h, bps, fps }),
                 Err(e) => {
                     self.no_hw = true;
                     eprintln!("deskline: no hardware encoder, using OpenH264: {e:#}");
@@ -218,17 +246,17 @@ impl Encoder {
             .usage_type(UsageType::CameraVideoRealTime)
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(bps))
-            .max_frame_rate(FrameRate::from_hz(30.0))
+            .max_frame_rate(FrameRate::from_hz(level_fps(w, h, fps) as f32))
             .complexity(Complexity::Low)
             .max_slice_len(16_000)
             .num_threads(4)
             .skip_frames(false);
         let enc = H264Encoder::with_api_config(OpenH264API::from_source(), config)?;
-        Ok(Stream { enc: Backend::Soft(enc), w, h, bps })
+        Ok(Stream { enc: Backend::Soft(enc), w, h, bps, fps })
     }
 
-    /// Step the size down when this computer can't keep 30 fps at it, and back up after a
-    /// stretch with clear room.
+    /// Step the size down when this computer can't keep the frame rate at it, and back up after
+    /// a stretch with clear room.
     fn pace(&mut self, f: &Frame, took: Duration) {
         let p = &mut self.pace;
         p.frames += 1;
@@ -238,13 +266,14 @@ impl Encoder {
         }
         let ms = p.busy.as_secs_f64() * 1000.0 / p.frames as f64;
         (p.since, p.frames, p.busy) = (Instant::now(), 0, Duration::ZERO);
+        let budget = 1000.0 / self.quality.fps() as f64;
         let steps = self.cpu_steps + self.net_step as u32;
         let smaller = fit(f.w, f.h, self.quality, steps + 1) != fit(f.w, f.h, self.quality, steps);
-        if ms > SLOW_MS && smaller {
+        if ms > budget * SLOW && smaller {
             self.cpu_steps += 1;
             p.calm = 0;
             p.up_after = (p.up_after * 2).min(64);
-        } else if self.cpu_steps > 0 && ms * STEP_PIXELS < ROOM_MS {
+        } else if self.cpu_steps > 0 && ms * STEP_PIXELS < budget * ROOM {
             p.calm += 1;
             if p.calm >= p.up_after {
                 self.cpu_steps -= 1;
@@ -304,7 +333,7 @@ impl Backend {
 }
 
 /// The encoded size of a `w`x`h` screen: the preset's long side, then `steps` of 2/3 (none
-/// going below `MIN_LONG`), within OpenH264's limits, with even sides.
+/// going below the quality's smallest), within OpenH264's limits, with even sides.
 fn fit(w: usize, h: usize, q: Quality, steps: u32) -> (usize, usize) {
     let (long, short) = (w.max(h) as u64, w.min(h) as u64);
     // Scale by num / den.
@@ -317,7 +346,7 @@ fn fit(w: usize, h: usize, q: Quality, steps: u32) -> (usize, usize) {
         (num, den) = (MAX_SHORT, short);
     }
     for _ in 0..steps {
-        if long * num * STEP.0 < MIN_LONG * den * STEP.1 {
+        if long * num * STEP.0 < q.min_long() * den * STEP.1 {
             break;
         }
         (num, den) = (num * STEP.0, den * STEP.1);
@@ -326,8 +355,22 @@ fn fit(w: usize, h: usize, q: Quality, steps: u32) -> (usize, usize) {
     (side(w), side(h))
 }
 
-/// `f` at `w`x`h` (cropped to even sides, or area-averaged down) as I420.
-fn to_yuv(f: &Frame, w: usize, h: usize, scaler: &mut Option<Scaler>, scratch: &mut Vec<u8>) -> YUVBuffer {
+/// `fps`, or less where H.264 level 5.2 runs out at this size.
+fn level_fps(w: usize, h: usize, fps: u32) -> u32 {
+    let mbs = (w.div_ceil(16) * h.div_ceil(16)) as u64;
+    (MAX_MBPS / mbs.max(1)).clamp(1, fps.into()) as u32
+}
+
+/// `f` at `w`x`h` (cropped to even sides, or area-averaged down) as I420, in `yuv`'s planes
+/// when they're the right size.
+fn to_yuv<'a>(
+    f: &Frame,
+    w: usize,
+    h: usize,
+    scaler: &mut Option<Scaler>,
+    scratch: &mut Vec<u8>,
+    yuv: &'a mut Option<YUVBuffer>,
+) -> &'a YUVBuffer {
     let px: &[u8] = if (w, h) == (f.w, f.h) {
         &f.px
     } else if (w, h) == (f.w & !1, f.h & !1) {
@@ -340,11 +383,16 @@ fn to_yuv(f: &Frame, w: usize, h: usize, scaler: &mut Option<Scaler>, scratch: &
         scaler.as_mut().expect("just set").run(&f.px, scratch);
         scratch.as_slice()
     };
-    if f.bgra {
-        YUVBuffer::from_bgra8_source(BgraSliceU8::new(px, (w, h)))
-    } else {
-        YUVBuffer::from_rgba8_source(RgbaSliceU8::new(px, (w, h)))
+    if yuv.as_ref().is_none_or(|y| y.dimensions() != (w, h)) {
+        *yuv = Some(YUVBuffer::new(w, h));
     }
+    let out = yuv.as_mut().expect("just set");
+    if f.bgra {
+        out.read_bgra8(BgraSliceU8::new(px, (w, h)));
+    } else {
+        out.read_rgba8(RgbaSliceU8::new(px, (w, h)));
+    }
+    out
 }
 
 fn crop(f: &Frame, w: usize, h: usize, out: &mut Vec<u8>) {
@@ -432,13 +480,26 @@ impl Decoder {
         Ok(Self { h264: H264Decoder::new()? })
     }
 
-    /// Returns `(width, height, rgba)` when the packet completes a picture.
+    /// Returns `(width, height, rgba)` when the packet completes a picture. For checking the
+    /// Windows hardware encoder's output, and tests; the window uses `decode_into`.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn decode(&mut self, packet: &[u8]) -> anyhow::Result<Option<(usize, usize, Vec<u8>)>> {
+        self.decode_into(packet, |w, h| vec![0; w * h * 4])
+    }
+
+    /// `decode`, writing RGBA straight into the buffer `make(w, h)` gives, which must be `w` *
+    /// `h` * 4 bytes: the window's own image, with no copy in between.
+    pub fn decode_into<B: AsMut<[u8]>>(
+        &mut self,
+        packet: &[u8],
+        make: impl FnOnce(usize, usize) -> B,
+    ) -> anyhow::Result<Option<(usize, usize, B)>> {
         let Some(yuv) = self.h264.decode(packet)? else { return Ok(None) };
         let (w, h) = yuv.dimensions();
-        let mut rgba = vec![0; w * h * 4];
-        yuv.write_rgba8(&mut rgba);
-        Ok(Some((w, h, rgba)))
+        let mut out = make(w, h);
+        anyhow::ensure!(out.as_mut().len() == w * h * 4, "picture buffer is the wrong size");
+        yuv.write_rgba8(out.as_mut());
+        Ok(Some((w, h, out)))
     }
 }
 
@@ -642,6 +703,24 @@ mod tests {
         enc.set_rate(0.6);
         let (w, _, _) = dec.decode(&enc.encode(&busy(1920, 1080, 2), false).unwrap()).unwrap().unwrap();
         assert_eq!(w, 1920);
+    }
+
+    #[test]
+    fn gaming_stays_within_the_level_and_above_720p() {
+        // Level 5.2 holds 4K at 64 fps, 1080p at 120.
+        assert_eq!(level_fps(3840, 2160, 120), 64);
+        assert_eq!(level_fps(1920, 1080, 120), 120);
+        assert_eq!(level_fps(1920, 1080, 30), 30);
+        assert_eq!(fit(3840, 2160, Quality::Gaming, 0), (3840, 2160));
+        assert_eq!(fit(3840, 2160, Quality::Gaming, 9), (1706, 960));
+        // 8.3 ms a frame at 120 fps: 9 ms is too slow.
+        let mut enc = soft(Quality::Gaming);
+        let f = frame(3840, 2160, 0);
+        enc.pace.since = Instant::now() - Duration::from_secs(2);
+        for _ in 0..10 {
+            enc.pace(&f, Duration::from_millis(9));
+        }
+        assert_eq!(enc.cpu_steps, 1);
     }
 
     #[test]

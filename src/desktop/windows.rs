@@ -3,7 +3,7 @@
 //! screen, lock screen and UAC prompts onto the secure desktop. Run as a normal user it can't see
 //! those, nor click into elevated (admin) windows unless Deskline runs as admin.
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Interface, w};
 
-use super::{Frame, Input, Monitor};
+use super::{Frame, Input, Monitor, Pool, gap};
 use crate::keyhook;
 
 /// Only channels, atomics and plain data: it's shared across tokio tasks. Windows, desktops and
@@ -42,6 +42,8 @@ struct Shared {
     want: AtomicUsize,
     /// Where the shared monitor sits on the desktop, to aim the mouse.
     rect: Mutex<RECT>,
+    /// Most frames a second to capture (0: the default).
+    fps: AtomicU32,
 }
 
 enum Job {
@@ -51,7 +53,7 @@ enum Job {
 }
 
 impl Screen {
-    pub async fn open(_home: &Path) -> anyhow::Result<(Self, watch::Receiver<Option<Arc<Frame>>>)> {
+    pub async fn open(_home: &Path, _fresh: bool) -> anyhow::Result<(Self, watch::Receiver<Option<Arc<Frame>>>)> {
         let shared = Arc::new(Shared::default());
         let (jobs, rx) = mpsc::channel();
         let s = shared.clone();
@@ -79,6 +81,15 @@ impl Screen {
 
     pub async fn select(&mut self, index: usize) -> anyhow::Result<()> {
         self.shared.want.store(index, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn input_allowed(&self) -> bool {
+        true
+    }
+
+    pub fn set_fps(&mut self, fps: u32) -> anyhow::Result<()> {
+        self.shared.fps.store(fps, Ordering::SeqCst);
         Ok(())
     }
 
@@ -233,6 +244,8 @@ fn send_input(i: Input, shared: RECT) {
             }
         }
         Input::CtrlAltDel => crate::service::request_sas(),
+        // Without ABSOLUTE the counts go to the pointer as is, and to raw-input games.
+        Input::MoveBy { dx, dy } => mouse(MOUSEEVENTF_MOVE, dx, dy, 0),
         Input::Key { code, down } => {
             let Some((scan, extended, vk)) = keyhook::to_windows(code) else { return };
             let mut flags = if vk == 0 { KEYEVENTF_SCANCODE } else { KEYBD_EVENT_FLAGS(0) };
@@ -334,9 +347,10 @@ fn capture(tx: watch::Sender<Option<Arc<Frame>>>, shared: Arc<Shared>, ready: on
         let started = Instant::now();
         match d.next() {
             Ok(Some(f)) => {
-                tx.send_replace(Some(Arc::new(f)));
-                // 30 fps is plenty for a desktop and halves the work of 60 Hz screens.
-                std::thread::sleep(Duration::from_millis(33).saturating_sub(started.elapsed()));
+                d.pool.send(&tx, f);
+                // 30 fps is plenty for a desktop and halves the work of 60 Hz screens; a game
+                // asks for more.
+                std::thread::sleep(gap(shared.fps.load(Ordering::SeqCst)).saturating_sub(started.elapsed()));
             }
             Ok(None) => {}
             Err(_) => dup = None,
@@ -355,6 +369,7 @@ struct Dup {
     desk: Vec<u8>,
     fresh: bool,
     pointer: Pointer,
+    pool: Pool,
 }
 
 impl Dup {
@@ -403,6 +418,7 @@ impl Dup {
                 desk: Vec::new(),
                 fresh: true,
                 pointer: Pointer::default(),
+                pool: Pool::default(),
             })
         }
     }
@@ -438,7 +454,8 @@ impl Dup {
             if !desktop && !pointer {
                 return Ok(None);
             }
-            let mut px = self.desk.clone();
+            let mut px = self.pool.take(self.desk.len());
+            px.extend_from_slice(&self.desk);
             self.pointer.draw(&mut px, self.w, self.h);
             Ok(Some(Frame { w: self.w, h: self.h, bgra: true, px }))
         }

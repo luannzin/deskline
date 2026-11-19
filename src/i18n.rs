@@ -191,6 +191,29 @@ const LINES: &[(&str, &str)] = &[
     ("Privacy mode isn't available on Linux.", "O modo privacidade não existe no Linux."),
     ("Privacy mode isn't available on macOS.", "O modo privacidade não existe no macOS."),
     ("Unexpected reply.", "Resposta inesperada."),
+    // games, and choosing again what's shared
+    ("Gaming (120 fps)", "Jogos (120 fps)"),
+    ("Other screens…", "Outras telas…"),
+    ("Asks their computer to choose again what it shares", "Pede ao computador da pessoa pra escolher de novo o que compartilha"),
+    ("Asked them to choose again what they share.", "Pedimos pra pessoa escolher de novo o que compartilha."),
+    ("Capture mouse", "Capturar mouse"),
+    (
+        "For games: your mouse moves theirs directly. Ctrl+Alt+Shift+Z gives it back.",
+        "Pra jogos: seu mouse move o da pessoa direto. Ctrl+Alt+Shift+Z devolve.",
+    ),
+    ("Ctrl+Alt+Shift+Z gives the mouse back", "Ctrl+Alt+Shift+Z devolve o mouse"),
+    ("Choose screens", "Escolher telas"),
+    ("Pick again what they see, and whether they may control", "Escolha de novo o que a pessoa vê e se ela pode controlar"),
+    ("They're already choosing what to share.", "A pessoa já está escolhendo o que compartilhar."),
+    (
+        "They closed their sharing dialog a moment ago. Ask them on the phone or in chat.",
+        "A pessoa fechou a janela de compartilhamento agora há pouco. Peça por telefone ou no chat.",
+    ),
+    ("All of their screens are already in the list.", "Todas as telas da pessoa já estão na lista."),
+    (
+        "They didn't allow remote control in their system's sharing dialog.",
+        "A pessoa não permitiu o controle remoto na janela de compartilhamento do sistema.",
+    ),
 ];
 
 /// Lines that end in a detail (a name, a path, an error), longest starts first.
@@ -213,6 +236,8 @@ const STARTS: &[(&str, &str)] = &[
     ("Received ", "Recebido: "),
     ("Sent ", "Enviado: "),
     ("File transfer failed: ", "A transferência falhou: "),
+    ("Nothing changed on their side: ", "Nada mudou do lado da pessoa: "),
+    ("Their computer refused the mouse or keyboard: ", "O computador da pessoa recusou o mouse ou o teclado: "),
 ];
 
 #[cfg(test)]

@@ -6,8 +6,9 @@
 //! - X11 sessions without the portal (XFCE, Cinnamon, MATE, i3…): the X server itself (`x11.rs`).
 //!
 //! Portals ask the user once; the answer is remembered with a restore token so later sessions
-//! only need Deskline's own prompt.
-use std::cell::RefCell;
+//! only need Deskline's own prompt. That answer can be wrong later (one screen picked, remote
+//! interaction left off): opening `fresh` skips the token, so the dialog asks again.
+use std::cell::{Cell, RefCell};
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::rc::Rc;
@@ -21,7 +22,7 @@ use pipewire as pw;
 use pw::spa;
 use tokio::sync::watch;
 
-use super::{ALT, CTRL, Frame, Input, Monitor};
+use super::{ALT, CTRL, DEFAULT_FPS, Frame, Input, Monitor, Pool};
 
 #[path = "wlr.rs"]
 mod wlr;
@@ -50,20 +51,22 @@ const CTRL_ALT_DEL: &[Input] = &[
 pub struct Screen(Backend);
 
 enum Backend {
-    Portal { portal: RemoteDesktop, session: Session<RemoteDesktop>, capture: Capture },
+    /// `input`: the person left remote interaction on in the portal's dialog.
+    Portal { portal: RemoteDesktop, session: Session<RemoteDesktop>, capture: Capture, input: bool },
     Wlr { session: Session<Screencast>, capture: Capture, devices: wlr::Devices },
     X11(x11::Screen),
 }
 
 impl Screen {
-    pub async fn open(home: &Path) -> anyhow::Result<(Self, Frames)> {
+    /// `fresh`: ignore the remembered answer and show the portal's dialog again.
+    pub async fn open(home: &Path, fresh: bool) -> anyhow::Result<(Self, Frames)> {
         if let Some(portal) = remote_desktop().await {
-            return open_portal(home, portal).await;
+            return open_portal(home, portal, fresh).await;
         }
         let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
         // Wayland without the RemoteDesktop portal: wlroots, if the compositor offers virtual input.
         if wayland && let Ok(devices) = tokio::task::block_in_place(wlr::Devices::connect) {
-            return open_wlr(home, devices).await;
+            return open_wlr(home, devices, fresh).await;
         }
         let x11 = std::env::var("XDG_SESSION_TYPE").as_deref() == Ok("x11") || !wayland;
         if x11 && std::env::var_os("DISPLAY").is_some() {
@@ -78,7 +81,7 @@ impl Screen {
     pub async fn input(&mut self, i: Input) -> anyhow::Result<()> {
         for &i in expand(&i) {
             match &mut self.0 {
-                Backend::Portal { portal, session, capture } => portal_input(portal, session, capture, i).await?,
+                Backend::Portal { portal, session, capture, .. } => portal_input(portal, session, capture, i).await?,
                 Backend::Wlr { devices, .. } => devices.send(i)?,
                 Backend::X11(x) => x.input(i)?,
             }
@@ -117,6 +120,20 @@ impl Screen {
         Ok(())
     }
 
+    pub fn input_allowed(&self) -> bool {
+        !matches!(self.0, Backend::Portal { input: false, .. })
+    }
+
+    pub fn set_fps(&mut self, fps: u32) -> anyhow::Result<()> {
+        match &mut self.0 {
+            Backend::Portal { capture, .. } | Backend::Wlr { capture, .. } => capture.set_fps(fps),
+            Backend::X11(x) => {
+                x.set_fps(fps);
+                Ok(())
+            }
+        }
+    }
+
     pub async fn close(self) {
         match self.0 {
             Backend::Portal { session, .. } => {
@@ -148,11 +165,16 @@ async fn screencast() -> Option<Screencast> {
     portal.available_source_types().await.ok()?.contains(SourceType::MONITOR).then_some(portal)
 }
 
-async fn open_portal(home: &Path, portal: RemoteDesktop) -> anyhow::Result<(Screen, Frames)> {
+/// The remembered portal answer, unless asking again.
+fn token(file: &Path, fresh: bool) -> Option<String> {
+    if fresh { None } else { std::fs::read_to_string(file).ok() }
+}
+
+async fn open_portal(home: &Path, portal: RemoteDesktop, fresh: bool) -> anyhow::Result<(Screen, Frames)> {
     let cast = Screencast::new().await.context("no screencast portal (xdg-desktop-portal)")?;
     let session = portal.create_session(Default::default()).await?;
     let token_file = home.join("portal-token");
-    let token = std::fs::read_to_string(&token_file).ok();
+    let token = token(&token_file, fresh);
     portal
         .select_devices(
             &session,
@@ -179,18 +201,20 @@ async fn open_portal(home: &Path, portal: RemoteDesktop) -> anyhow::Result<(Scre
     if let Some(t) = started.restore_token() {
         let _ = std::fs::write(&token_file, t);
     }
+    // GNOME's dialog has "Allow remote interaction"; off, the session only shows the screen.
+    let input = started.devices().contains(DeviceType::KEYBOARD | DeviceType::POINTER);
     let fd = cast.open_pipe_wire_remote(&session, Default::default()).await?;
     let (capture, frames) = Capture::start(fd, started.streams().to_vec())?;
-    Ok((Screen(Backend::Portal { portal, session, capture }), frames))
+    Ok((Screen(Backend::Portal { portal, session, capture, input }), frames))
 }
 
-async fn open_wlr(home: &Path, devices: wlr::Devices) -> anyhow::Result<(Screen, Frames)> {
+async fn open_wlr(home: &Path, devices: wlr::Devices, fresh: bool) -> anyhow::Result<(Screen, Frames)> {
     let cast = screencast()
         .await
         .context("sharing this screen needs xdg-desktop-portal-wlr (or your compositor's own portal) running")?;
     let session = cast.create_session(Default::default()).await?;
     let token_file = home.join("screencast-token");
-    let token = std::fs::read_to_string(&token_file).ok();
+    let token = token(&token_file, fresh);
     cast.select_sources(
         &session,
         SelectSourcesOptions::default()
@@ -240,6 +264,7 @@ async fn portal_input(portal: &RemoteDesktop, s: &Session<RemoteDesktop>, captur
         Input::Key { code, down } => {
             portal.notify_keyboard_keycode(s, code as i32, state(down), Default::default()).await?
         }
+        Input::MoveBy { dx, dy } => portal.notify_pointer_motion(s, dx.into(), dy.into(), Default::default()).await?,
         Input::CtrlAltDel => {}
     }
     Ok(())
@@ -249,12 +274,15 @@ async fn portal_input(portal: &RemoteDesktop, s: &Session<RemoteDesktop>, captur
 struct Capture {
     streams: Vec<Stream>,
     current: usize,
+    fps: u32,
     cmds: pw::channel::Sender<Cmd>,
     frames: Frames,
 }
 
 enum Cmd {
     Switch(u32),
+    /// Ask the compositor for at most this many frames a second.
+    Rate(u32),
     Stop,
 }
 
@@ -271,7 +299,7 @@ impl Capture {
         })?;
         // Wait for the stream to be set up so a failure is reported instead of a black screen.
         tokio::task::block_in_place(|| ready.recv()).context("capture thread died")??;
-        Ok((Self { streams, current: 0, cmds, frames: frames.clone() }, frames))
+        Ok((Self { streams, current: 0, fps: DEFAULT_FPS, cmds, frames: frames.clone() }, frames))
     }
 
     fn stream(&self) -> &Stream {
@@ -296,10 +324,22 @@ impl Capture {
     fn select(&mut self, index: usize) -> anyhow::Result<()> {
         let node = self.streams.get(index).context("that screen isn't shared")?.pipe_wire_node_id();
         if index != self.current {
-            self.cmds.send(Cmd::Switch(node)).map_err(|_| anyhow::anyhow!("screen capture has stopped"))?;
+            self.send(Cmd::Switch(node))?;
             self.current = index;
         }
         Ok(())
+    }
+
+    fn set_fps(&mut self, fps: u32) -> anyhow::Result<()> {
+        if fps != self.fps {
+            self.send(Cmd::Rate(fps))?;
+            self.fps = fps;
+        }
+        Ok(())
+    }
+
+    fn send(&self, cmd: Cmd) -> anyhow::Result<()> {
+        self.cmds.send(cmd).map_err(|_| anyhow::anyhow!("screen capture has stopped"))
     }
 }
 
@@ -310,8 +350,8 @@ impl Drop for Capture {
 }
 
 /// Runs the PipeWire loop on this thread until `Stop`, capturing whichever node `Switch` named
-/// last. When the system ends the stream (its own "sharing" indicator), the loop ends and drops
-/// the frame sender, which ends the session.
+/// last at the rate `Rate` asked for. When the system ends the stream (its own "sharing"
+/// indicator), the loop ends and drops the frame sender, which ends the session.
 fn capture(
     fd: OwnedFd,
     node: u32,
@@ -324,17 +364,23 @@ fn capture(
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_fd_rc(fd, None)?;
     let frames = Rc::new(frames);
-    let watching = Rc::new(RefCell::new(Some(connect(&core, &mainloop, node, frames.clone())?)));
+    let watching = Rc::new(RefCell::new(Some(connect(&core, &mainloop, node, DEFAULT_FPS, frames.clone())?)));
+    // The node and rate being captured.
+    let now = Cell::new((node, DEFAULT_FPS));
     let _cmds = cmds.attach(mainloop.loop_(), {
         let (mainloop, watching) = (mainloop.clone(), watching.clone());
-        move |cmd| match cmd {
-            Cmd::Stop => mainloop.quit(),
-            Cmd::Switch(node) => {
-                drop(watching.take());
-                match connect(&core, &mainloop, node, frames.clone()) {
-                    Ok(w) => *watching.borrow_mut() = Some(w),
-                    Err(_) => mainloop.quit(),
-                }
+        move |cmd| {
+            let (node, fps) = match (cmd, now.get()) {
+                (Cmd::Stop, _) => return mainloop.quit(),
+                (Cmd::Switch(node), (_, fps)) => (node, fps),
+                (Cmd::Rate(fps), (node, _)) => (node, fps),
+            };
+            now.set((node, fps));
+            // The format is fixed once connected: a new rate is a new connection.
+            drop(watching.take());
+            match connect(&core, &mainloop, node, fps, frames.clone()) {
+                Ok(w) => *watching.borrow_mut() = Some(w),
+                Err(_) => mainloop.quit(),
             }
         }
     });
@@ -353,12 +399,14 @@ struct Watching {
 struct Data {
     info: spa::param::video::VideoInfoRaw,
     frames: Rc<watch::Sender<Option<Arc<Frame>>>>,
+    pool: Pool,
 }
 
 fn connect(
     core: &pw::core::CoreRc,
     mainloop: &pw::main_loop::MainLoopRc,
     node: u32,
+    fps: u32,
     frames: Rc<watch::Sender<Option<Arc<Frame>>>>,
 ) -> anyhow::Result<Watching> {
     use spa::param::format::{MediaSubtype, MediaType};
@@ -377,7 +425,7 @@ fn connect(
 
     let quit = mainloop.clone();
     let listener = stream
-        .add_local_listener_with_user_data(Data { info: Default::default(), frames })
+        .add_local_listener_with_user_data(Data { info: Default::default(), frames, pool: Pool::default() })
         .state_changed(move |_, _, _, new| {
             if matches!(new, pw::stream::StreamState::Error(_) | pw::stream::StreamState::Unconnected) {
                 quit.quit();
@@ -407,15 +455,15 @@ fn connect(
             if w == 0 || h == 0 || size == 0 || src.len() < offset + (h - 1) * stride + w * 4 {
                 return;
             }
-            let mut px = Vec::with_capacity(w * h * 4);
+            let mut px = s.pool.take(w * h * 4);
             for y in 0..h {
                 px.extend_from_slice(&src[offset + y * stride..][..w * 4]);
             }
-            s.frames.send_replace(Some(Arc::new(Frame { w, h, bgra, px })));
+            s.pool.send(&s.frames, Frame { w, h, bgra, px });
         })
         .register()?;
 
-    let bytes = format_pod()?;
+    let bytes = format_pod(fps)?;
     let mut params = [Pod::from_bytes(&bytes).context("bad format pod")?];
     stream.connect(
         spa::utils::Direction::Input,
@@ -426,8 +474,9 @@ fn connect(
     Ok(Watching { _listener: listener, _stream: stream })
 }
 
-/// Plain memory buffers (no DMA-BUF modifiers offered), 4-byte pixels, at most 30 fps.
-fn format_pod() -> anyhow::Result<Vec<u8>> {
+/// Plain memory buffers (no DMA-BUF modifiers offered), 4-byte pixels, at most `fps` a second:
+/// the compositor holds back the rest instead of copying frames nobody encodes.
+fn format_pod(fps: u32) -> anyhow::Result<Vec<u8>> {
     use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
     use spa::param::video::VideoFormat;
     use spa::pod::{Value, serialize::PodSerializer};
@@ -462,9 +511,9 @@ fn format_pod() -> anyhow::Result<Vec<u8>> {
             Choice,
             Range,
             Fraction,
-            spa::utils::Fraction { num: 30, denom: 1 },
+            spa::utils::Fraction { num: fps, denom: 1 },
             spa::utils::Fraction { num: 0, denom: 1 },
-            spa::utils::Fraction { num: 30, denom: 1 }
+            spa::utils::Fraction { num: fps, denom: 1 }
         ),
     );
     Ok(PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(format))?.0.into_inner())

@@ -62,6 +62,16 @@ screen (F11 to leave), **Files** and **Chat**. Drop files on the window to send 
 the other computer's Downloads. Copy on one computer and paste on the other: the clipboard follows
 while you have control. On Windows every key goes through, Win, Alt+Tab and Print Screen included.
 
+For games and video, pick **Gaming (120 fps)**: up to 4K at up to 120 frames a second, keeping the
+frame rate and giving up size first when the link or the computer can't keep up. **Capture mouse**
+hands your mouse's raw movement to their computer, the way games that hide the pointer read it;
+**Ctrl+Alt+Shift+Z** gives it back. The toolbar shows the frames a second you're getting.
+
+On Linux the system's own sharing dialog decides which screens are shared and whether the viewer
+may control. That answer isn't final: the monitor picker's **Other screens…** asks for it again,
+the person sharing has **Choose screens** on the red bar, and giving control when remote
+interaction was left off brings the dialog back by itself.
+
 Each session gets a tab, so you can have several screens open, and several people can watch the
 same screen.
 
@@ -177,7 +187,9 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
 - `src/host.rs`, `src/viewer.rs`: both ends of a session. Frames are acked and as many may be in
   flight as fill one round trip; when acks hold the sender back, the encoder is asked for fewer
   bits, and for more once the link is calm.
-- `src/codec.rs`: H.264 with OpenH264 compiled in, sized and paced by the quality setting.
+- `src/codec.rs`: H.264 with OpenH264 compiled in (or the GPU's encoder on Windows), sized and
+  paced by the quality setting: 30 fps for desktops, 120 for games. A picture that goes still is
+  encoded again a few times so text blurred by motion sharpens.
 - `src/audio.rs`: what the speakers play, as Opus.
 - `src/files.rs`, `src/clip.rs`: file transfer and clipboard.
 - `src/desktop/`: capture and input. Windows: DXGI duplication and `SendInput`, following the
@@ -190,6 +202,9 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
 ## Known limits
 
 - Linux can't share the sign-in screen, and privacy mode is Windows-only.
+- 4K at 120 fps needs a GPU encoder on the shared computer (Windows) and a fast CPU on the viewing
+  one: Linux and macOS encode in software, and every viewer decodes in software, so Gaming settles
+  at a smaller size there.
 - Sharing sound from a Mac needs macOS 14.6+ or a loopback device such as BlackHole.
 - On a Mac the permissions are tied to the app's signature: an unsigned build asks again after
   each update.

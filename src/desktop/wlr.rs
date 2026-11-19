@@ -177,6 +177,10 @@ impl Wayland {
                 p.frame();
             }
             Input::Key { code, down } => self.keyboard.key(time, code.into(), down.into()),
+            Input::MoveBy { dx, dy } => {
+                p.motion(time, dx.into(), dy.into());
+                p.frame();
+            }
             Input::CtrlAltDel => {}
         }
     }

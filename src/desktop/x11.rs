@@ -1,9 +1,9 @@
 //! X11 sessions without the RemoteDesktop portal (XFCE, Cinnamon, MATE, i3…): pictures of the
 //! root window through shared memory, the pointer drawn in from XFixes, and input through XTEST.
 //! Monitors are RandR CRTCs; changing them during a session isn't followed.
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::Context;
 use tokio::sync::watch;
@@ -17,7 +17,7 @@ use x11rb::protocol::{randr, shm, xfixes};
 use x11rb::rust_connection::RustConnection;
 
 use super::Frames;
-use crate::desktop::{Frame, Input, Monitor};
+use crate::desktop::{Frame, Input, Monitor, Pool, gap};
 
 /// X buttons for `Input::Button`: left, right, middle, back, forward.
 const BUTTONS: [u8; 5] = [1, 3, 2, 8, 9];
@@ -37,6 +37,7 @@ pub struct Screen {
     monitors: Vec<(Monitor, Rect)>,
     current: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
+    fps: Arc<AtomicU32>,
 }
 
 impl Screen {
@@ -61,18 +62,23 @@ impl Screen {
         let first = monitors.iter().position(|(m, _)| m.primary).unwrap_or(0);
         let current = Arc::new(AtomicUsize::new(first));
         let stop = Arc::new(AtomicBool::new(false));
+        let fps = Arc::new(AtomicU32::new(0));
 
         let (tx, frames) = watch::channel(None);
         let (ready_tx, ready) = mpsc::channel();
         let rects: Vec<Rect> = monitors.iter().map(|(_, r)| *r).collect();
-        let (which, quit) = (current.clone(), stop.clone());
+        let (which, quit, rate) = (current.clone(), stop.clone(), fps.clone());
         std::thread::Builder::new().name("x11".into()).spawn(move || {
-            if let Err(e) = capture(&rects, &which, &quit, &tx, &ready_tx) {
+            if let Err(e) = capture(&rects, &which, &quit, &rate, &tx, &ready_tx) {
                 let _ = ready_tx.send(Err(e));
             }
         })?;
         ready.recv().context("capture thread died")??;
-        Ok((Self { conn, root, monitors, current, stop }, frames))
+        Ok((Self { conn, root, monitors, current, stop, fps }, frames))
+    }
+
+    pub fn set_fps(&self, fps: u32) {
+        self.fps.store(fps, Ordering::Relaxed);
     }
 
     pub fn monitors(&self) -> Vec<Monitor> {
@@ -116,6 +122,11 @@ impl Screen {
                     fake(if down { KEY_PRESS_EVENT } else { KEY_RELEASE_EVENT }, k, (0, 0))?
                 }
             }
+            // XTEST motion with detail 1 is relative.
+            Input::MoveBy { dx, dy } => {
+                let step = |d: i32| d.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
+                fake(MOTION_NOTIFY_EVENT, 1, (step(dx), step(dy)))?
+            }
             Input::CtrlAltDel => {}
         }
         self.conn.flush()?;
@@ -156,11 +167,12 @@ fn crtcs(conn: &RustConnection, root: Window) -> anyhow::Result<Vec<(Monitor, Re
     Ok(found)
 }
 
-/// Pictures the selected monitor up to 30 times a second until `stop`, sending only changes.
+/// Pictures the selected monitor at most `fps` times a second until `stop`, sending only changes.
 fn capture(
     rects: &[Rect],
     current: &AtomicUsize,
     stop: &AtomicBool,
+    fps: &AtomicU32,
     frames: &watch::Sender<Option<Arc<Frame>>>,
     ready: &mpsc::Sender<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
@@ -171,12 +183,13 @@ fn capture(
     let shm = Shm::new(&conn, biggest).ok();
     let cursor = conn.extension_information(xfixes::X11_EXTENSION_NAME)?.is_some()
         && conn.xfixes_query_version(4, 0)?.reply().is_ok();
+    let mut pool = Pool::default();
     let _ = ready.send(Ok(()));
 
     while !stop.load(Ordering::Relaxed) {
         let started = Instant::now();
         let r = rects[current.load(Ordering::Relaxed)];
-        let px = grab(&conn, root, r, shm.as_ref())?;
+        let px = grab(&conn, root, r, shm.as_ref(), &mut pool)?;
         let mut frame = Frame { w: r.w.into(), h: r.h.into(), bgra: true, px };
         if cursor {
             let c = conn.xfixes_get_cursor_image()?.reply()?;
@@ -186,20 +199,24 @@ fn capture(
         }
         // The borrow ends with the condition, before the send.
         if frames.borrow().as_ref().is_none_or(|l| l.w != frame.w || l.px != frame.px) {
-            frames.send_replace(Some(Arc::new(frame)));
+            pool.send(frames, frame);
+        } else {
+            pool.recycle(frame);
         }
         // Keyboard mapping changes reach every client; drop them so they don't pile up.
         while let Ok(Some(_)) = conn.poll_for_event() {}
-        std::thread::sleep(Duration::from_millis(33).saturating_sub(started.elapsed()));
+        std::thread::sleep(gap(fps.load(Ordering::Relaxed)).saturating_sub(started.elapsed()));
     }
     Ok(())
 }
 
-fn grab(conn: &RustConnection, root: Window, r: Rect, shm: Option<&Shm>) -> anyhow::Result<Vec<u8>> {
+fn grab(conn: &RustConnection, root: Window, r: Rect, shm: Option<&Shm>, pool: &mut Pool) -> anyhow::Result<Vec<u8>> {
     let len = r.w as usize * r.h as usize * 4;
     if let Some(shm) = shm {
         conn.shm_get_image(root, r.x, r.y, r.w, r.h, !0, ImageFormat::Z_PIXMAP.into(), shm.seg, 0)?.reply()?;
-        return Ok(shm.bytes()[..len].to_vec());
+        let mut px = pool.take(len);
+        px.extend_from_slice(&shm.bytes()[..len]);
+        return Ok(px);
     }
     let mut px = conn.get_image(ImageFormat::Z_PIXMAP, root, r.x, r.y, r.w, r.h, !0)?.reply()?.data;
     anyhow::ensure!(px.len() >= len, "the X server sent a short picture");

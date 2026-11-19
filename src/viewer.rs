@@ -2,11 +2,11 @@
 //! trust), show the picture, send input, and the extras: sound, clipboard, chat, files. A link
 //! that drops reconnects on its own for a minute.
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use eframe::egui::{self, ColorImage};
+use eframe::egui::{self, Color32, ColorImage};
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, VarInt};
 use iroh::{Endpoint, EndpointId};
 use tokio::sync::mpsc;
@@ -14,7 +14,7 @@ use tokio::time::timeout;
 
 use crate::codec::{self, Quality};
 use crate::desktop::Monitor;
-use crate::proto::{self, ALPN, Ask, Hello, Packet, STOPPED, Tell, VERSION, recv_msg, send_msg};
+use crate::proto::{self, ALPN, Ask, CONTROL_PRIORITY, Hello, Packet, STOPPED, Tell, VERSION, recv_msg, send_msg};
 use crate::{audio, clip, files, net};
 
 /// What a viewing session tells the window.
@@ -24,8 +24,9 @@ pub enum ViewEvent {
     Viewing { who: String, control: bool },
     Control(bool),
     Monitors { list: Vec<Monitor>, current: usize },
-    /// The path in use ("LAN", "Direct", "Relay") and its round trip in ms.
-    Link { kind: &'static str, ms: u32 },
+    /// The path in use ("LAN", "Direct", "Relay"), its round trip in ms, and pictures shown in
+    /// the last second.
+    Link { kind: &'static str, ms: u32, fps: u32 },
     Chat(String),
     Note(String),
     Privacy(bool),
@@ -205,6 +206,8 @@ async fn session(
         Ok(s) => s,
         Err(e) => return lost(e.to_string()),
     };
+    // Acks and input go before file uploads.
+    let _ = send.set_priority(CONTROL_PRIORITY);
     let hello = Hello { version: VERSION.into(), name: opts.name.clone(), password: opts.password.clone(), remember: opts.remember, resume };
     if let Err(e) = send_msg(&mut send, &hello).await {
         return lost(e.to_string());
@@ -240,7 +243,8 @@ async fn session(
         Ok(v) => v,
         Err(e) => return Outcome::Lost { why: e.to_string(), got_in: true },
     };
-    let decoder = tokio::spawn(decode(video, acks.clone(), slot.clone(), out.clone()));
+    let shown = Arc::new(AtomicU32::new(0));
+    let decoder = tokio::spawn(decode(video, acks.clone(), slot.clone(), out.clone(), shown.clone()));
     let sound = tokio::spawn(play(conn.clone(), out.clone(), id));
     let mut tells = proto::reader::<Tell>(recv);
     let mut clipboard = if control { clip::Clipboard::watch().ok() } else { None };
@@ -313,7 +317,7 @@ async fn session(
             }
             _ = tick.tick() => {
                 let (kind, ms) = net::link(&conn);
-                out.send(id, ViewEvent::Link { kind, ms });
+                out.send(id, ViewEvent::Link { kind, ms, fps: shown.swap(0, Ordering::Relaxed) });
             }
             Some(_) = transfers.join_next() => {}
         }
@@ -333,21 +337,36 @@ fn connect_error(e: &str) -> String {
     }
 }
 
+/// A picture for the window, written as RGBA bytes by the decoder.
+struct Pixels(ColorImage);
+
+impl AsMut<[u8]> for Pixels {
+    fn as_mut(&mut self) -> &mut [u8] {
+        let px = &mut self.0.pixels;
+        // SAFETY: Color32 is repr(C) over [u8; 4] (RGBA, premultiplied; the picture is opaque,
+        // so premultiplied and plain are the same bytes), so the pixels are 4 bytes each.
+        unsafe { std::slice::from_raw_parts_mut(px.as_mut_ptr().cast::<u8>(), px.len() * 4) }
+    }
+}
+
 async fn decode(
     mut video: RecvStream,
     acks: mpsc::UnboundedSender<Cmd>,
     slot: Arc<Mutex<Option<ColorImage>>>,
     out: Out,
+    shown: Arc<AtomicU32>,
 ) -> anyhow::Result<()> {
     let mut dec = codec::Decoder::new()?;
     loop {
         let p: Packet = recv_msg(&mut video).await?;
+        // Straight into the window's image: at 4K and 120 fps an extra copy is 4 GB/s.
         let pic = tokio::task::block_in_place(|| {
-            dec.decode(&p.data).map(|pic| pic.map(|(w, h, rgba)| ColorImage::from_rgba_unmultiplied([w, h], &rgba)))
+            dec.decode_into(&p.data, |w, h| Pixels(ColorImage::filled([w, h], Color32::BLACK)))
         });
         match pic {
-            Ok(Some(img)) => {
+            Ok(Some((_, _, Pixels(img)))) => {
                 *slot.lock().unwrap() = Some(img);
+                shown.fetch_add(1, Ordering::Relaxed);
                 out.repaint();
             }
             Ok(None) => {}

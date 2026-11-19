@@ -14,8 +14,6 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMe
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{GUID, HRESULT, Interface, PWSTR};
 
-/// One frame at 30 fps in Media Foundation's 100 ns units.
-const FRAME: i64 = 10_000_000 / 30;
 /// A hardware encoder answers in a few ms; this long means it's stuck or holding frames back.
 const PATIENCE: Duration = Duration::from_millis(500);
 
@@ -28,6 +26,8 @@ pub struct Encoder {
     ids: (u32, u32),
     w: usize,
     h: usize,
+    /// Frames a second it was set up for: its rate control spreads the bitrate over them.
+    fps: u32,
     frames: i64,
     /// Inputs the encoder asked for and hasn't been given yet.
     wants: u32,
@@ -55,9 +55,9 @@ fn startup() -> anyhow::Result<()> {
 }
 
 impl Encoder {
-    /// The first hardware encoder that takes NV12 at `w`x`h` and gives Constrained Baseline
-    /// H.264 at a constant `bps`, with no frames held back.
-    pub fn new(w: usize, h: usize, bps: u32) -> anyhow::Result<Self> {
+    /// The first hardware encoder that takes NV12 at `w`x`h` and `fps` and gives Constrained
+    /// Baseline H.264 at a constant `bps`, with no frames held back.
+    pub fn new(w: usize, h: usize, bps: u32, fps: u32) -> anyhow::Result<Self> {
         com();
         startup()?;
         let video = |subtype| MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype };
@@ -78,7 +78,7 @@ impl Encoder {
         let mut why = Vec::new();
         for a in found {
             let name = name(&a);
-            match Self::open(a, name.clone(), w, h, bps) {
+            match Self::open(a, name.clone(), w, h, bps, fps) {
                 Ok(e) => return Ok(e),
                 Err(e) => why.push(format!("{name}: {e:#}")),
             }
@@ -86,20 +86,21 @@ impl Encoder {
         anyhow::bail!("{}", why.join("; "))
     }
 
-    fn open(activate: IMFActivate, name: String, w: usize, h: usize, bps: u32) -> anyhow::Result<Self> {
+    fn open(activate: IMFActivate, name: String, w: usize, h: usize, bps: u32, fps: u32) -> anyhow::Result<Self> {
         let mft: IMFTransform = unsafe { activate.ActivateObject()? };
         let (Ok(events), Ok(codec)) = (mft.cast::<IMFMediaEventGenerator>(), mft.cast::<ICodecAPI>()) else {
             unsafe { activate.ShutdownObject()? };
             anyhow::bail!("no event generator or ICodecAPI");
         };
-        let mut enc = Self { activate, mft, events, codec, ids: (0, 0), w, h, frames: 0, wants: 0, headers: Vec::new(), name };
+        let mut enc =
+            Self { activate, mft, events, codec, ids: (0, 0), w, h, fps, frames: 0, wants: 0, headers: Vec::new(), name };
         // On failure the drop shuts it down.
         enc.configure(bps)?;
         Ok(enc)
     }
 
     fn configure(&mut self, bps: u32) -> anyhow::Result<()> {
-        let (w, h) = (self.w as u64, self.h as u64);
+        let (w, h, fps) = (self.w as u64, self.h as u64, u64::from(self.fps));
         unsafe {
             let attrs = self.mft.GetAttributes()?;
             anyhow::ensure!(attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) == 1, "not asynchronous");
@@ -116,7 +117,7 @@ impl Encoder {
                 t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
                 t.SetGUID(&MF_MT_SUBTYPE, subtype)?;
                 t.SetUINT64(&MF_MT_FRAME_SIZE, (w << 32) | h)?;
-                t.SetUINT64(&MF_MT_FRAME_RATE, (30 << 32) | 1)?;
+                t.SetUINT64(&MF_MT_FRAME_RATE, (fps << 32) | 1)?;
                 t.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1 << 32) | 1)?;
                 t.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
                 Ok(t)
@@ -264,10 +265,12 @@ impl Encoder {
             }
             buf.Unlock()?;
             buf.SetCurrentLength(len as u32)?;
+            // One frame in Media Foundation's 100 ns units.
+            let frame = 10_000_000 / i64::from(self.fps);
             let s = MFCreateSample()?;
             s.AddBuffer(&buf)?;
-            s.SetSampleTime(self.frames * FRAME)?;
-            s.SetSampleDuration(FRAME)?;
+            s.SetSampleTime(self.frames * frame)?;
+            s.SetSampleDuration(frame)?;
             Ok(s)
         }
     }

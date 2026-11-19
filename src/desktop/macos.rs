@@ -21,7 +21,7 @@ use objc2_core_graphics::{
 use objc2_io_surface::{IOSurfaceLockOptions, IOSurfaceRef};
 use tokio::sync::watch;
 
-use super::{Frame, Input, Monitor};
+use super::{DEFAULT_FPS, Frame, Input, Monitor};
 
 // ponytail: fixed at the macOS default; the user's own setting needs AppKit.
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
@@ -55,6 +55,8 @@ pub struct Screen {
     /// Dropping it stops the capture thread, which owns every CoreGraphics object, so `Screen`
     /// itself is plain data and channels (and `Send`).
     _capture: mpsc::Sender<()>,
+    /// Most frames a second the stream delivers.
+    fps: u32,
     /// Held modifier keys, one bit per `MODIFIERS` entry.
     mods: u8,
     caps: bool,
@@ -67,7 +69,7 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub async fn open(_home: &Path) -> anyhow::Result<(Self, watch::Receiver<Option<Arc<Frame>>>)> {
+    pub async fn open(_home: &Path, _fresh: bool) -> anyhow::Result<(Self, watch::Receiver<Option<Arc<Frame>>>)> {
         if !CGPreflightScreenCaptureAccess() {
             // Shows the system prompt (once) and lists Deskline in the settings pane.
             let _ = CGRequestScreenCaptureAccess();
@@ -78,13 +80,14 @@ impl Screen {
         let displays = displays()?;
         let (frames, rx) = watch::channel(None);
         let want = Arc::new(AtomicU32::new(displays[0].id));
-        let capture = start(&displays[0], frames.clone(), want.clone())?;
+        let capture = start(&displays[0], frames.clone(), want.clone(), DEFAULT_FPS)?;
         let screen = Self {
             displays,
             current: 0,
             frames,
             want,
             _capture: capture,
+            fps: DEFAULT_FPS,
             mods: 0,
             caps: false,
             buttons: 0,
@@ -117,10 +120,23 @@ impl Screen {
         if index != self.current {
             // Let the new display through first, so its first frame isn't filtered out.
             let old = self.want.swap(d.id, Ordering::SeqCst);
-            let capture = start(&d, self.frames.clone(), self.want.clone())
+            let capture = start(&d, self.frames.clone(), self.want.clone(), self.fps)
                 .inspect_err(|_| self.want.store(old, Ordering::SeqCst))?;
             self._capture = capture; // drops the old sender, which stops the old stream
             self.current = index;
+        }
+        Ok(())
+    }
+
+    pub fn input_allowed(&self) -> bool {
+        true
+    }
+
+    /// The stream's rate is fixed when it starts: a new rate is a new stream.
+    pub fn set_fps(&mut self, fps: u32) -> anyhow::Result<()> {
+        if fps != self.fps {
+            self._capture = start(&self.displays[self.current], self.frames.clone(), self.want.clone(), fps)?;
+            self.fps = fps;
         }
         Ok(())
     }
@@ -146,14 +162,12 @@ impl Screen {
                     r.origin.x + x.max(0.0).min(1.0) as f64 * (r.size.width - 1.0),
                     r.origin.y + y.max(0.0).min(1.0) as f64 * (r.size.height - 1.0),
                 );
-                // With a button held, apps only follow drag events (selections, window moves).
-                let (kind, button) = match self.buttons {
-                    0 => (CGEventType::MouseMoved, 0),
-                    b if b & 1 != 0 => (CGEventType::LeftMouseDragged, 0),
-                    b if b & 2 != 0 => (CGEventType::RightMouseDragged, 1),
-                    b => (CGEventType::OtherMouseDragged, b.trailing_zeros()),
-                };
-                self.post(CGEvent::new_mouse_event(None, kind, at, CGMouseButton(button)));
+                self.moved(at, None);
+            }
+            // Games read the deltas; the position keeps the pointer in step for everyone else.
+            Input::MoveBy { dx, dy } => {
+                let p = cursor();
+                self.moved(CGPoint::new(p.x + f64::from(dx), p.y + f64::from(dy)), Some((dx, dy)));
             }
             // 0 left, 1 right, 2 middle, 3 back, 4 forward: Quartz numbers them the same way.
             Input::Button { button, down } => {
@@ -217,6 +231,23 @@ impl Screen {
         // Dropping `_capture` stops the stream.
     }
 
+    /// The pointer to `at`, with `delta` as the movement apps see.
+    fn moved(&self, at: CGPoint, delta: Option<(i32, i32)>) {
+        // With a button held, apps only follow drag events (selections, window moves).
+        let (kind, button) = match self.buttons {
+            0 => (CGEventType::MouseMoved, 0),
+            b if b & 1 != 0 => (CGEventType::LeftMouseDragged, 0),
+            b if b & 2 != 0 => (CGEventType::RightMouseDragged, 1),
+            b => (CGEventType::OtherMouseDragged, b.trailing_zeros()),
+        };
+        let e = CGEvent::new_mouse_event(None, kind, at, CGMouseButton(button));
+        if let (Some(e), Some((dx, dy))) = (&e, delta) {
+            CGEvent::set_integer_value_field(Some(&**e), CGEventField::MouseEventDeltaX, dx.into());
+            CGEvent::set_integer_value_field(Some(&**e), CGEventField::MouseEventDeltaY, dy.into());
+        }
+        self.post(e);
+    }
+
     /// Posts as if from the keyboard and mouse, with the viewer's modifiers (and only theirs) held,
     /// so shift-click and command-click work and this computer's own keys don't leak in.
     fn post(&self, e: Option<CFRetained<CGEvent>>) {
@@ -266,19 +297,20 @@ fn displays() -> anyhow::Result<Vec<Display>> {
     Ok(list)
 }
 
-/// Starts streaming `d` on its own thread and waits until it runs. Dropping the returned sender
-/// stops it.
+/// Starts streaming `d` at most `fps` times a second on its own thread and waits until it runs.
+/// Dropping the returned sender stops it.
 fn start(
     d: &Display,
     frames: watch::Sender<Option<Arc<Frame>>>,
     want: Arc<AtomicU32>,
+    fps: u32,
 ) -> anyhow::Result<mpsc::Sender<()>> {
     let (stop, stop_rx) = mpsc::channel();
     let (ready_tx, ready) = mpsc::channel();
     let (id, px) = (d.id, d.px);
     std::thread::Builder::new()
         .name("capture".into())
-        .spawn(move || capture(id, px, frames, want, stop_rx, ready_tx))?;
+        .spawn(move || capture(id, px, fps, frames, want, stop_rx, ready_tx))?;
     tokio::task::block_in_place(|| ready.recv())??;
     Ok(stop)
 }
@@ -288,6 +320,7 @@ fn start(
 fn capture(
     display: CGDirectDisplayID,
     (w, h): (usize, usize),
+    fps: u32,
     frames: watch::Sender<Option<Arc<Frame>>>,
     want: Arc<AtomicU32>,
     stop: mpsc::Receiver<()>,
@@ -309,9 +342,9 @@ fn capture(
             }
         },
     );
-    // Pointer drawn in, and at most 30 fps: plenty for a desktop. Idle screens send nothing.
+    // Pointer drawn in, and at most `fps`: 30 is plenty for a desktop. Idle screens send nothing.
     let keys: [&CFString; 2] = unsafe { [kCGDisplayStreamShowCursor, kCGDisplayStreamMinimumFrameTime] };
-    let fps = CFNumber::new_f64(1.0 / 30.0);
+    let fps = CFNumber::new_f64(1.0 / f64::from(fps.max(1)));
     let values: [&CFType; 2] = [CFBoolean::new(true), &fps];
     let props = CFDictionary::from_slices(&keys, &values);
     let queue = DispatchQueue::new("deskline.capture", None);

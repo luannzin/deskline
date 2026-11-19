@@ -21,6 +21,10 @@ pub const ALPN: &[u8] = b"deskline/2";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Close code: the host ended the session on purpose, so the viewer shouldn't reconnect.
 pub const STOPPED: u32 = 1;
+/// QUIC sends higher priorities first: the control stream (acks, input) before video, video
+/// before file streams (0).
+pub const CONTROL_PRIORITY: i32 = 2;
+pub const VIDEO_PRIORITY: i32 = 1;
 
 /// The viewer's first message.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -52,6 +56,9 @@ pub enum Ask {
     /// Blank the host's own screen and lock its own mouse and keyboard, or undo that.
     Privacy(bool),
     Quality(Quality),
+    /// Ask the host's system again which screens to share and whether input is allowed (its
+    /// sharing dialog, on Linux). New in 0.5.
+    Reshare,
 }
 
 /// Host to viewer.

@@ -1,10 +1,11 @@
 //! The shared screen: captured frames out, injected input in. One backend per OS.
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use eframe::egui::Key;
 use serde::{Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 #[cfg_attr(all(target_os = "linux", not(test)), path = "linux.rs")]
 #[cfg_attr(all(windows, not(test)), path = "windows.rs")]
@@ -48,20 +49,71 @@ pub enum Input {
     Key { code: u16, down: bool },
     /// The secure attention sequence: Windows' sign-in and lock screen answer only to this.
     CtrlAltDel,
+    /// The pointer moved this many counts, wherever it is: games that hide the pointer and read
+    /// raw movement (the viewer captured its mouse). New in 0.5; older hosts skip it.
+    MoveBy { dx: i32, dy: i32 },
 }
+
+type Tx = watch::Sender<Option<Arc<Frame>>>;
+type Rx = watch::Receiver<Option<Arc<Frame>>>;
 
 pub struct Screen {
     imp: imp::Screen,
     /// Keys and buttons the viewer holds down, released when control ends so nothing sticks.
     held: Vec<Input>,
-    pub frames: watch::Receiver<Option<Arc<Frame>>>,
+    /// Stays the same channel when `swap` puts a new capture behind it, so sessions go on.
+    pub frames: Rx,
+    relay: Relay,
+}
+
+/// A capture `Screen::prepare` opened, not showing yet.
+pub struct Prepared(imp::Screen, Rx);
+
+impl Prepared {
+    pub async fn close(self) {
+        self.0.close().await;
+    }
 }
 
 impl Screen {
     /// Start capturing the primary monitor. On Linux this may show the system's sharing dialog.
     pub async fn open(home: &Path) -> anyhow::Result<Self> {
-        let (imp, frames) = imp::Screen::open(home).await?;
-        Ok(Self { imp, held: Vec::new(), frames })
+        let Prepared(imp, inner) = Self::prepare(home, false).await?;
+        let (tx, frames) = watch::channel(None);
+        Ok(Self { imp, held: Vec::new(), frames, relay: Relay::start(inner, tx) })
+    }
+
+    /// Open a second capture beside this one. `fresh`: ask the system again rather than reuse the
+    /// answer it remembered (Linux portals: which screens, and whether input is allowed). Waits
+    /// for that dialog as long as the person takes, so call it without holding the `Screen`.
+    pub async fn prepare(home: &Path, fresh: bool) -> anyhow::Result<Prepared> {
+        let (imp, frames) = imp::Screen::open(home, fresh).await?;
+        Ok(Prepared(imp, frames))
+    }
+
+    /// Show `p` from now on, on the same `frames`; the old capture closes. Monitors and whether
+    /// input works may have changed.
+    pub async fn swap(&mut self, p: Prepared) -> anyhow::Result<()> {
+        let Prepared(imp, inner) = p;
+        let Some(tx) = self.relay.stop().await else {
+            imp.close().await;
+            anyhow::bail!("screen capture has stopped");
+        };
+        self.release().await;
+        std::mem::replace(&mut self.imp, imp).close().await;
+        self.relay = Relay::start(inner, tx);
+        Ok(())
+    }
+
+    /// The system lets this capture drive the mouse and keyboard. False where someone turned
+    /// that off in the system's sharing dialog (Linux portals): `prepare(fresh)` asks again.
+    pub fn input_allowed(&self) -> bool {
+        self.imp.input_allowed()
+    }
+
+    /// The most frames a second to capture: the fastest any viewer's picture wants.
+    pub fn set_fps(&mut self, fps: u32) -> anyhow::Result<()> {
+        self.imp.set_fps(fps.clamp(1, 240))
     }
 
     /// The screens that can be shared, in the order `select` takes them.
@@ -120,6 +172,90 @@ impl Screen {
         let _ = self.imp.privacy(false).await;
         self.imp.close().await;
     }
+}
+
+/// Passes a capture's frames on to `Screen::frames`. Stopped, it hands the sender back for the
+/// next capture; if the capture ends on its own (the system's "stop sharing"), the sender drops,
+/// which ends the sessions.
+struct Relay {
+    stop: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<Option<Tx>>,
+}
+
+impl Relay {
+    fn start(mut inner: Rx, tx: Tx) -> Self {
+        let (stop, mut stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    r = &mut stopped => return r.is_ok().then_some(tx),
+                    r = inner.changed() => match r {
+                        Ok(()) => {
+                            tx.send_replace(inner.borrow_and_update().clone());
+                        }
+                        Err(_) => return None,
+                    },
+                }
+            }
+        });
+        Self { stop: Some(stop), task }
+    }
+
+    async fn stop(&mut self) -> Option<Tx> {
+        let _ = self.stop.take()?.send(());
+        (&mut self.task).await.ok().flatten()
+    }
+}
+
+/// Frame buffers to reuse. A 4K frame is 33 MB: a new one per frame is fresh memory from the
+/// system every time (malloc maps anything over 32 MB, Windows anything over 512 KB), and
+/// faulting it in costs milliseconds a frame.
+// ponytail: macOS still allocates per frame (its copy is in a CoreGraphics callback); add it
+// there when 4K capture on a Mac shows up in a profile.
+#[derive(Default)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub struct Pool(Vec<Arc<Frame>>);
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+impl Pool {
+    /// An empty buffer with room for `len` bytes, from a frame nobody holds any more if there is one.
+    pub fn take(&mut self, len: usize) -> Vec<u8> {
+        let free = self.0.iter().position(|f| Arc::strong_count(f) == 1);
+        let mut px = free.and_then(|i| Arc::into_inner(self.0.swap_remove(i))).map_or_else(Vec::new, |f| f.px);
+        px.clear();
+        px.reserve(len);
+        px
+    }
+
+    /// Publish `f`, keeping the frame it replaces for reuse.
+    pub fn send(&mut self, tx: &Tx, f: Frame) {
+        if let Some(old) = tx.send_replace(Some(Arc::new(f))) {
+            self.keep(old);
+        }
+    }
+
+    /// A frame that wasn't sent (nothing changed): its buffer can be used again.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn recycle(&mut self, f: Frame) {
+        self.keep(Arc::new(f));
+    }
+
+    fn keep(&mut self, f: Arc<Frame>) {
+        // Three is enough: the channel, the encoder and the frame in between let go in turn.
+        if self.0.len() < 3 {
+            self.0.push(f);
+        }
+    }
+}
+
+/// Frames a second captured until a viewer wants more: plenty for a desktop.
+pub const DEFAULT_FPS: u32 = 30;
+
+/// The pause between captures at `fps` (0: `DEFAULT_FPS`).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub fn gap(fps: u32) -> Duration {
+    Duration::from_secs(1) / if fps == 0 { DEFAULT_FPS } else { fps }
 }
 
 pub const SHIFT: u16 = 42;
@@ -220,4 +356,48 @@ pub fn evdev(key: Key) -> Option<u16> {
         F24 => 194,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::timeout;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn swapped_capture_keeps_the_channel_and_closing_ends_it() {
+        let wait = Duration::from_secs(2);
+        let home = std::env::temp_dir();
+        let mut s = Screen::open(&home).await.unwrap();
+        let mut frames = s.frames.clone();
+        timeout(wait, frames.changed()).await.unwrap().unwrap();
+        s.swap(Screen::prepare(&home, true).await.unwrap()).await.unwrap();
+        for _ in 0..3 {
+            timeout(wait, frames.changed()).await.expect("frames stopped after the swap").unwrap();
+        }
+        s.close().await;
+        let closed = timeout(wait, async {
+            while frames.changed().await.is_ok() {}
+        });
+        closed.await.expect("closing the screen must end its frames");
+    }
+
+    #[test]
+    fn pool_hands_back_only_buffers_nobody_holds() {
+        let (tx, rx) = watch::channel(None);
+        let mut pool = Pool::default();
+        let frame = |px: Vec<u8>| Frame { w: 2, h: 2, bgra: true, px };
+        let mut px = pool.take(16);
+        px.extend_from_slice(&[1; 16]);
+        let first = px.as_ptr();
+        pool.send(&tx, frame(px));
+        pool.send(&tx, frame(vec![2; 16]));
+        // The first frame was replaced and nothing holds it: its buffer comes back, emptied.
+        let again = pool.take(16);
+        assert_eq!((again.as_ptr(), again.len()), (first, 0));
+        // The second is held (an encoder still working on it) once replaced: not handed out.
+        let held = rx.borrow().clone().unwrap();
+        pool.send(&tx, frame(again));
+        let fresh = pool.take(16);
+        assert_ne!(fresh.as_ptr(), held.px.as_ptr());
+    }
 }

@@ -18,7 +18,7 @@ pub struct Screen {
 }
 
 impl Screen {
-    pub async fn open(_home: &Path) -> anyhow::Result<(Self, watch::Receiver<Option<Arc<Frame>>>)> {
+    pub async fn open(_home: &Path, _fresh: bool) -> anyhow::Result<(Self, watch::Receiver<Option<Arc<Frame>>>)> {
         let (tx, rx) = watch::channel(None);
         let current = Arc::new(AtomicUsize::new(0));
         let which = current.clone();
@@ -61,6 +61,14 @@ impl Screen {
     }
 
     pub async fn privacy(&mut self, _on: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    pub fn input_allowed(&self) -> bool {
+        true
+    }
+
+    pub fn set_fps(&mut self, _fps: u32) -> anyhow::Result<()> {
         Ok(())
     }
 

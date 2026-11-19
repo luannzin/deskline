@@ -16,14 +16,22 @@ use tokio::time::{Instant, timeout};
 
 use crate::codec::{self, Quality};
 use crate::desktop::{Frame, Screen};
-use crate::proto::{self, Ask, Hello, Packet, STOPPED, Tell, recv_msg, send_msg};
+use crate::proto::{self, Ask, CONTROL_PRIORITY, Hello, Packet, STOPPED, Tell, VIDEO_PRIORITY, recv_msg, send_msg};
 use crate::settings::{self, Peer, Store};
 use crate::{audio, clip, files, net};
 
-const FRAME_GAP: Duration = Duration::from_millis(33);
 /// A viewer whose link dropped gets straight back in for this long.
 const GRACE: Duration = Duration::from_secs(90);
 const MAX_SESSIONS: usize = 8;
+/// After the person here closes the system's sharing dialog, a viewer can't open it again for
+/// this long: asking again and again would be a way to nag them.
+const DECLINED: Duration = Duration::from_secs(30);
+/// A picture that stays still this long is encoded again, up to `REFINE_FRAMES` times, so text
+/// blurred by the motion before it sharpens; a re-encode under `REFINE_DONE` bytes is as sharp
+/// as it gets.
+const REFINE_AFTER: Duration = Duration::from_millis(200);
+const REFINE_FRAMES: u32 = 8;
+const REFINE_DONE: usize = 512;
 
 /// The host side to the window.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -58,6 +66,8 @@ pub enum HostCmd {
     /// The unattended-access password; None turns it off.
     SetPassword(Option<String>),
     Untrust(String),
+    /// Choose again what to share: the system's dialog, on Linux.
+    Reshare,
 }
 
 impl HostCmd {
@@ -91,6 +101,10 @@ struct Host {
     /// Viewers whose link dropped, and whether they had control.
     recent: Mutex<HashMap<EndpointId, (Instant, bool)>>,
     failures: Mutex<Failures>,
+    /// Held while the system's sharing dialog is up: one at a time.
+    resharing: AsyncMutex<()>,
+    /// When the person here last closed that dialog without choosing.
+    declined: Mutex<Option<Instant>>,
 }
 
 /// The one capture all sessions share.
@@ -104,6 +118,8 @@ struct Live {
     peer: EndpointId,
     who: String,
     control: bool,
+    /// Frames a second its picture wants.
+    fps: u32,
     tx: mpsc::UnboundedSender<Cmd>,
 }
 
@@ -113,6 +129,9 @@ enum Cmd {
     Stop,
     /// The same viewer came back on a new connection; this one is dead.
     Replaced,
+    /// The capture was chosen again: the monitors, and whether input works, may differ.
+    Screens,
+    Note(String),
 }
 
 struct Answer {
@@ -138,6 +157,8 @@ pub fn start(ep: Endpoint, dir: PathBuf, store: Store, name: String, ui: UiLink)
         prompts: Mutex::default(),
         recent: Mutex::default(),
         failures: Mutex::default(),
+        resharing: AsyncMutex::new(()),
+        declined: Mutex::default(),
     });
     host.resync();
     tokio::spawn(host.clone().commands(cmds));
@@ -208,7 +229,56 @@ impl Host {
                     }
                     self.security();
                 }
+                HostCmd::Reshare => {
+                    tokio::spawn(self.clone().reshare(None));
+                }
             }
+        }
+    }
+
+    /// Ask the system again what to share: on Linux the portal's dialog, so the person here can
+    /// pick other screens or turn remote interaction on. The new capture goes behind every
+    /// session's picture; closing the dialog keeps the old one. `by`: the session that asked.
+    async fn reshare(self: Arc<Self>, by: Option<u64>) {
+        let Ok(_one) = self.resharing.try_lock() else {
+            if let Some(id) = by {
+                self.to(id, Cmd::Note("They're already choosing what to share.".into()));
+            }
+            return;
+        };
+        // The dialog waits on the person here, so nothing is held meanwhile.
+        match Screen::prepare(&self.dir, true).await {
+            Ok(p) => {
+                let slot = self.capture.lock().await;
+                match slot.as_ref() {
+                    Some(c) => {
+                        if let Err(e) = c.screen.lock().await.swap(p).await {
+                            self.send(HostEvent::Error(format!("Couldn't share your screen: {e}")));
+                        }
+                    }
+                    // Everyone left while the dialog was up.
+                    None => p.close().await,
+                }
+                *self.declined.lock().unwrap() = None;
+            }
+            Err(e) => {
+                *self.declined.lock().unwrap() = Some(Instant::now());
+                if let Some(id) = by {
+                    self.to(id, Cmd::Note(format!("Nothing changed on their side: {e}")));
+                }
+            }
+        }
+        // Either way, sessions check what they have now (control without input is taken back).
+        for l in self.sessions.lock().unwrap().values() {
+            let _ = l.tx.send(Cmd::Screens);
+        }
+    }
+
+    /// Capture as fast as the most demanding viewer's picture wants.
+    async fn refresh_fps(&self, screen: &AsyncMutex<Screen>) {
+        let fps = self.sessions.lock().unwrap().values().map(|l| l.fps).max().unwrap_or(Quality::default().fps());
+        if let Err(e) = screen.lock().await.set_fps(fps) {
+            eprintln!("deskline: couldn't capture at {fps} fps: {e:#}");
         }
     }
 
@@ -239,8 +309,12 @@ impl Host {
 
         let id = IDS.fetch_add(1, Ordering::Relaxed);
         let (tx, cmds) = mpsc::unbounded_channel();
-        self.sessions.lock().unwrap().insert(id, Live { peer, who: who.clone(), control, tx });
+        self.sessions.lock().unwrap().insert(id, Live { peer, who: who.clone(), control, fps: Quality::default().fps(), tx });
         self.send(HostEvent::Sharing { id, who: who.clone(), control });
+        // In with control, but the system's remembered answer was "no remote interaction".
+        if control && !screen.lock().await.input_allowed() {
+            tokio::spawn(self.clone().reshare(Some(id)));
+        }
         settings::log(&self.dir, &format!("{who}  connected ({how}){}", if control { " with control" } else { "" }));
         let started = Instant::now();
 
@@ -252,6 +326,7 @@ impl Host {
         if privacy {
             let _ = screen.lock().await.privacy(false).await;
         }
+        self.refresh_fps(&screen).await;
         self.detach(screen).await;
         let why = match end {
             End::Lost(why) => {
@@ -411,6 +486,7 @@ impl Host {
         control: &mut bool,
         privacy: &mut bool,
     ) -> anyhow::Result<End> {
+        let _ = send.set_priority(CONTROL_PRIORITY);
         send_msg(send, &Tell::Accepted { name: self.name.clone(), control: *control }).await?;
         let (list, current) = {
             let s = screen.lock().await;
@@ -419,6 +495,7 @@ impl Host {
         send_msg(send, &Tell::Monitors { list, current }).await?;
 
         let video = conn.open_uni().await?;
+        let _ = video.set_priority(VIDEO_PRIORITY);
         let (acked_tx, acked) = watch::channel(0u32);
         let (quality_tx, quality) = watch::channel(Quality::default());
         let key = Arc::new(Notify::new());
@@ -427,12 +504,22 @@ impl Host {
         let mut clipboard = if *control { clip::Clipboard::watch().ok() } else { None };
         let mut sound: Option<(audio::Capture, mpsc::Receiver<Vec<u8>>)> = None;
         let mut asked = false;
+        // The viewer hears once that input is being refused, rather than clicking into nothing.
+        let mut refused = false;
 
         let end = loop {
             tokio::select! {
                 a = asks.recv() => match a {
                     Some(Ask::Input(i)) if *control => {
-                        let _ = screen.lock().await.input(i).await;
+                        let mut s = screen.lock().await;
+                        if let Err(e) = s.input(i).await
+                            && !refused
+                            && s.input_allowed()
+                        {
+                            refused = true;
+                            drop(s);
+                            send_msg(send, &Tell::Note(format!("Their computer refused the mouse or keyboard: {e}"))).await?;
+                        }
                     }
                     Some(Ask::Ack(n)) => {
                         acked_tx.send_replace(n);
@@ -484,6 +571,22 @@ impl Host {
                     },
                     Some(Ask::Quality(q)) => {
                         quality_tx.send_replace(q);
+                        if let Some(l) = self.sessions.lock().unwrap().get_mut(&id) {
+                            l.fps = q.fps();
+                        }
+                        self.refresh_fps(screen).await;
+                    }
+                    // Other screens, or input after all: only Linux's portals choose what's shared.
+                    Some(Ask::Reshare) if cfg!(target_os = "linux") => {
+                        let recently = self.declined.lock().unwrap().is_some_and(|t| t.elapsed() < DECLINED);
+                        if recently {
+                            send_msg(send, &Tell::Note("They closed their sharing dialog a moment ago. Ask them on the phone or in chat.".into())).await?;
+                        } else {
+                            tokio::spawn(self.clone().reshare(Some(id)));
+                        }
+                    }
+                    Some(Ask::Reshare) => {
+                        send_msg(send, &Tell::Note("All of their screens are already in the list.".into())).await?;
                     }
                     Some(Ask::Bye) => break End::Bye("They disconnected.".into()),
                     Some(_) => {}
@@ -504,6 +607,12 @@ impl Host {
                             *control = on;
                             if on {
                                 clipboard = clip::Clipboard::watch().ok();
+                                refused = false;
+                                // Given control, but the system was told "no remote
+                                // interaction": its dialog asks again.
+                                if !screen.lock().await.input_allowed() {
+                                    tokio::spawn(self.clone().reshare(Some(id)));
+                                }
                             } else {
                                 clipboard = None;
                                 let mut s = screen.lock().await;
@@ -518,6 +627,18 @@ impl Host {
                         send_msg(send, &Tell::Control(on)).await?;
                     }
                     Some(Cmd::Chat(text)) => send_msg(send, &Tell::Chat(text)).await?,
+                    Some(Cmd::Note(text)) => send_msg(send, &Tell::Note(text)).await?,
+                    Some(Cmd::Screens) => {
+                        let s = screen.lock().await;
+                        let (list, current, input) = (s.monitors(), s.current(), s.input_allowed());
+                        drop(s);
+                        key.notify_one();
+                        send_msg(send, &Tell::Monitors { list, current }).await?;
+                        if *control && !input {
+                            send_msg(send, &Tell::Note("They didn't allow remote control in their system's sharing dialog.".into())).await?;
+                            self.to(id, Cmd::Control(false));
+                        }
+                    }
                     Some(Cmd::Replaced) => break End::Lost("Reconnected.".into()),
                     Some(Cmd::Stop) | None => break End::Stopped("You stopped sharing.".into()),
                 },
@@ -596,10 +717,19 @@ impl Failures {
     }
 }
 
-/// Capture -> encode -> send, newest frame only, at most 30 fps. Enough frames may be unacked
-/// to fill one round trip (a long link isn't capped at 2 per RTT); when acks hold the pump back
-/// for a good part of each second the link is full, so the encoder is asked for fewer bits,
-/// and for more again once it's been calm for a while.
+/// Why the pump encodes a frame.
+enum Why {
+    New,
+    /// The viewer asked for a keyframe.
+    Key,
+    /// The picture has been still for `REFINE_AFTER`.
+    Refine,
+}
+
+/// Capture -> encode -> send, newest frame only, at most the quality's frame rate. Enough
+/// frames may be unacked to fill one round trip (a long link isn't capped at 2 per RTT); when
+/// acks hold the pump back for a good part of each second the link is full, so the encoder is
+/// asked for fewer bits, and for more again once it's been calm for a while.
 async fn pump(
     conn: Connection,
     mut frames: watch::Receiver<Option<Arc<Frame>>>,
@@ -613,8 +743,13 @@ async fn pump(
     let mut last: Option<Arc<Frame>> = None;
     let mut rate = 1.0f32;
     let (mut second, mut blocked, mut calm) = (Instant::now(), Duration::ZERO, 0);
+    // Re-encodes of a still picture left.
+    let mut refine = 0;
     loop {
-        let in_flight = (net::rtt(&conn).as_millis() / FRAME_GAP.as_millis() + 2).clamp(2, 8) as u32;
+        let gap = Duration::from_secs(1) / enc.fps();
+        // ponytail: frames, not bytes, in flight; a byte budget (bitrate x RTT) if 4K frames
+        // ever fill a link's buffers.
+        let in_flight = (net::rtt(&conn).as_millis() / gap.as_millis() + 2).clamp(2, 32) as u32;
         let waited = Instant::now();
         while seq.wrapping_sub(*acked.borrow_and_update()) >= in_flight {
             acked.changed().await?;
@@ -638,22 +773,28 @@ async fn pump(
             enc.set_quality(*quality.borrow_and_update());
         }
         // A keyframe request re-encodes the last frame: the screen may be sitting still.
-        let force = tokio::select! {
-            r = frames.changed() => { r.map_err(|_| anyhow::anyhow!("capture ended"))?; false }
-            _ = key.notified(), if last.is_some() => true,
+        let why = tokio::select! {
+            r = frames.changed() => { r.map_err(|_| anyhow::anyhow!("capture ended"))?; Why::New }
+            _ = key.notified(), if last.is_some() => Why::Key,
+            _ = tokio::time::sleep(REFINE_AFTER), if refine > 0 && last.is_some() => Why::Refine,
         };
-        if !force {
+        if matches!(why, Why::New) {
             last = frames.borrow_and_update().clone();
         }
         let Some(frame) = last.clone() else { continue };
         let started = Instant::now();
-        let data = tokio::task::block_in_place(|| enc.encode(&frame, force))?;
+        let data = tokio::task::block_in_place(|| enc.encode(&frame, matches!(why, Why::Key)))?;
+        refine = match why {
+            Why::Refine if data.len() < REFINE_DONE => 0,
+            Why::Refine => refine - 1,
+            Why::New | Why::Key => REFINE_FRAMES,
+        };
         if data.is_empty() {
             continue;
         }
         seq = seq.wrapping_add(1);
         send_msg(&mut out, &Packet { seq, data }).await?;
-        tokio::time::sleep_until(started + FRAME_GAP).await;
+        tokio::time::sleep_until(started + gap).await;
     }
 }
 
@@ -757,6 +898,22 @@ mod tests {
         v.send(Ask::Monitor(1));
         next_view(&mut viewer, "monitor 2", |e| matches!(e, ViewEvent::Monitors { current: 1, .. })).await;
 
+        // Gaming, raw mouse movement, and choosing again what's shared: the session goes on and
+        // the picture comes from the new capture.
+        v.send(Ask::Quality(Quality::Gaming));
+        v.send(Ask::Input(Input::MoveBy { dx: 3, dy: -2 }));
+        v.send(Ask::Reshare);
+        next_view(&mut viewer, "monitors after choosing again", |e| matches!(e, ViewEvent::Monitors { .. })).await;
+        assert!(INJECTED.lock().unwrap().contains(&Input::MoveBy { dx: 3, dy: -2 }));
+        v.frame.lock().unwrap().take();
+        timeout(Duration::from_secs(5), async {
+            while v.frame.lock().unwrap().take().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("no picture after choosing again");
+
         // Chat both ways.
         v.send(Ask::Chat("hi".into()));
         next_host(&mut host, "chat", |e| matches!(e, HostEvent::Chat { text, .. } if text == "hi")).await;
@@ -766,7 +923,9 @@ mod tests {
         // Taking control back releases the held key; stopping ends it for good.
         cmd_tx.send(HostCmd::AllowControl { id, yes: false }).unwrap();
         next_view(&mut viewer, "control off", |e| matches!(e, ViewEvent::Control(false))).await;
-        assert_eq!(INJECTED.lock().unwrap().last(), Some(&Input::Key { code: 30, down: false }));
+        let injected = INJECTED.lock().unwrap().clone();
+        let last_key = injected.iter().rev().find(|i| matches!(i, Input::Key { .. }));
+        assert_eq!(last_key, Some(&Input::Key { code: 30, down: false }), "{injected:?}");
         cmd_tx.send(HostCmd::Stop { id }).unwrap();
         let ViewEvent::Ended { why, .. } = next_view(&mut viewer, "end", |e| matches!(e, ViewEvent::Ended { .. })).await else { unreachable!() };
         assert_eq!(why, "They stopped sharing.");
