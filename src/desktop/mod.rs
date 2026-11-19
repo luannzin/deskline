@@ -280,6 +280,8 @@ pub fn gap(fps: u32) -> Duration {
 pub const SHIFT: u16 = 42;
 pub const CTRL: u16 = 29;
 pub const ALT: u16 = 56;
+/// With Ctrl, the paste.
+pub const V: u16 = 47;
 
 /// egui key (by physical position) to Linux evdev code.
 pub fn evdev(key: Key) -> Option<u16> {

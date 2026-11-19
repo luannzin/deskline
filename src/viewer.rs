@@ -1,6 +1,7 @@
 //! Watching someone else's screen: connect, get in (their click, their password or their
 //! trust), show the picture, send input, and the extras: sound, clipboard, chat, files. A link
 //! that drops reconnects on its own for a minute.
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,12 +11,18 @@ use eframe::egui::{self, Color32, ColorImage};
 use iroh::endpoint::{Connection, ConnectionError, RecvStream, VarInt};
 use iroh::{Endpoint, EndpointId};
 use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 use tokio::time::timeout;
 
 use crate::codec::{self, Quality};
-use crate::desktop::Monitor;
+use crate::desktop::{CTRL, Input, Monitor, V};
+use crate::files::Dest;
 use crate::proto::{self, ALPN, Ask, CONTROL_PRIORITY, Hello, Packet, STOPPED, Tell, VERSION, recv_msg, send_msg};
 use crate::{audio, clip, files, net};
+
+/// Files copied on their computer come over to this one's clipboard by themselves up to this
+/// many bytes; past it the window offers to (`ViewEvent::TheirFiles`).
+const AUTO_COPY: u64 = 256 << 20;
 
 /// What a viewing session tells the window.
 #[derive(Debug)]
@@ -31,9 +38,36 @@ pub enum ViewEvent {
     Note(String),
     Privacy(bool),
     Listing(files::Listing),
-    Transfer { name: String, done: u64, total: u64 },
+    Transfer(Transfer),
+    /// They copied files too big to come over unasked (0: not any more); `Cmd::CopyTheirs`.
+    TheirFiles { count: usize, bytes: u64 },
+    /// Their computer takes files into any folder and on its clipboard.
+    FileTools,
     /// `password`: their unattended-access password would get you in.
     Ended { why: String, password: bool },
+}
+
+/// A file transfer, under way or over.
+#[derive(Debug, Clone)]
+pub struct Transfer {
+    /// This session's own number for it, for `Cmd::Cancel`.
+    pub id: u64,
+    pub what: What,
+    pub done: u64,
+    pub total: u64,
+    /// Once it's over: where it landed (on this computer, for what came here), or why not.
+    pub end: Option<Result<String, String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum What {
+    /// A file or folder, by name.
+    Send(String),
+    Get(String),
+    /// This many files pasted onto their computer from this one's clipboard.
+    PasteThere(usize),
+    /// This many files copied on their computer, coming to this one's clipboard.
+    PasteHere(usize),
 }
 
 /// The window's side of a session.
@@ -41,9 +75,18 @@ pub enum Cmd {
     Ask(Ask),
     /// List a folder on their computer ("" for the starting places).
     List(String),
-    Upload(PathBuf),
+    /// Send a file or folder: into this folder of theirs, or their Downloads.
+    Upload(PathBuf, Option<String>),
     /// Fetch a file or folder of theirs into this computer's Downloads.
     Download(String),
+    /// Stop that transfer.
+    Cancel(u64),
+    /// Ctrl+V on their screen: files on this computer's clipboard go over first.
+    Paste,
+    /// Copy the files on their clipboard here after all (`ViewEvent::TheirFiles`).
+    CopyTheirs,
+    /// From the session's own tasks: put these files on this computer's clipboard.
+    Clipboard(Vec<PathBuf>),
     Bye,
 }
 
@@ -248,8 +291,19 @@ async fn session(
     let sound = tokio::spawn(play(conn.clone(), out.clone(), id));
     let mut tells = proto::reader::<Tell>(recv);
     let mut clipboard = if control { clip::Clipboard::watch().ok() } else { None };
+    // File operations, each returning its transfer number (0 for a listing).
     let mut transfers = tokio::task::JoinSet::new();
+    let mut running: HashMap<u64, AbortHandle> = HashMap::new();
+    let mut numbers = 0u64;
+    let mut number = || {
+        numbers += 1;
+        numbers
+    };
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Their computer takes files into any folder and on its clipboard.
+    let mut tools = false;
+    // Files put on this computer's clipboard from theirs; theirs, too big to copy unasked.
+    let (mut ours, mut theirs) = (Vec::<PathBuf>::new(), None::<(Vec<String>, u64)>);
 
     let outcome = loop {
         tokio::select! {
@@ -266,13 +320,54 @@ async fn session(
                             Ok(l) => out.send(id, ViewEvent::Listing(l)),
                             Err(e) => out.send(id, ViewEvent::Note(format!("Couldn't open that folder: {e}"))),
                         }
+                        0
                     });
                 }
-                Some(Cmd::Upload(path)) => {
-                    transfers.spawn(upload(conn.clone(), path, out.clone(), id));
+                Some(Cmd::Upload(path, to)) => {
+                    let n = number();
+                    let r = Report::new(out, id, n, What::Send(file_name(&path)));
+                    running.insert(n, transfers.spawn(upload(conn.clone(), path, to.map(Dest::Folder), r)));
                 }
                 Some(Cmd::Download(remote)) => {
-                    transfers.spawn(download(conn.clone(), remote, out.clone(), id));
+                    let n = number();
+                    let r = Report::new(out, id, n, What::Get(file_name(std::path::Path::new(&remote))));
+                    running.insert(n, transfers.spawn(download(conn.clone(), remote, r)));
+                }
+                Some(Cmd::Cancel(n)) => {
+                    if let Some(t) = running.remove(&n) {
+                        t.abort();
+                    }
+                }
+                Some(Cmd::Paste) => {
+                    let mine = match &clipboard {
+                        Some(c) if tools => c.files().await,
+                        _ => Vec::new(),
+                    };
+                    if !mine.is_empty() && mine != ours {
+                        let n = number();
+                        let r = Report::new(out, id, n, What::PasteThere(mine.len()));
+                        running.insert(n, transfers.spawn(paste_there(conn.clone(), mine, acks.clone(), r)));
+                    } else {
+                        // A paste of what's already there (text, or files that came from it):
+                        // Ctrl is down already, since it made this a paste.
+                        for down in [true, false] {
+                            let _ = send_msg(&mut send, &Ask::Input(Input::Key { code: V, down })).await;
+                        }
+                    }
+                }
+                Some(Cmd::CopyTheirs) => {
+                    if let Some((paths, bytes)) = theirs.take() {
+                        let n = number();
+                        let r = Report::new(out, id, n, What::PasteHere(paths.len()));
+                        running.insert(n, transfers.spawn(copy_here(conn.clone(), paths, bytes, acks.clone(), r)));
+                    }
+                }
+                Some(Cmd::Clipboard(paths)) => {
+                    if let Some(c) = &clipboard
+                        && c.set_files(paths.clone()).await
+                    {
+                        ours = paths;
+                    }
                 }
                 Some(Cmd::Bye) | None => {
                     conn.close(0u8.into(), b"bye");
@@ -291,6 +386,25 @@ async fn session(
                 Some(Tell::Clip(text)) => {
                     if let Some(c) = &clipboard {
                         c.set(text);
+                    }
+                    if theirs.take().is_some() {
+                        out.send(id, ViewEvent::TheirFiles { count: 0, bytes: 0 });
+                    }
+                }
+                Some(Tell::FileTools) => {
+                    tools = true;
+                    out.send(id, ViewEvent::FileTools);
+                }
+                // Files copied over there come to this clipboard: by themselves when small.
+                Some(Tell::ClipFiles { paths, bytes }) if clipboard.is_some() && !paths.is_empty() => {
+                    if bytes <= AUTO_COPY {
+                        theirs = None;
+                        let n = number();
+                        let r = Report::new(out, id, n, What::PasteHere(paths.len()));
+                        running.insert(n, transfers.spawn(copy_here(conn.clone(), paths, bytes, acks.clone(), r)));
+                    } else {
+                        out.send(id, ViewEvent::TheirFiles { count: paths.len(), bytes });
+                        theirs = Some((paths, bytes));
                     }
                 }
                 Some(Tell::Chat(text)) => out.send(id, ViewEvent::Chat(proto::clean_chat(&text))),
@@ -312,14 +426,22 @@ async fn session(
                     };
                 }
             },
-            Some(text) = clip::changed(&mut clipboard) => {
-                let _ = send_msg(&mut send, &Ask::Clip(text)).await;
-            }
+            Some(change) = clip::changed(&mut clipboard) => match change {
+                clip::Change::Text(text) => {
+                    let _ = send_msg(&mut send, &Ask::Clip(text)).await;
+                }
+                // Files go over only when pasted on their screen (`Cmd::Paste`).
+                clip::Change::Files(_) => {}
+            },
             _ = tick.tick() => {
                 let (kind, ms) = net::link(&conn);
                 out.send(id, ViewEvent::Link { kind, ms, fps: shown.swap(0, Ordering::Relaxed) });
             }
-            Some(_) = transfers.join_next() => {}
+            Some(done) = transfers.join_next() => {
+                if let Ok(n) = done {
+                    running.remove(&n);
+                }
+            }
         }
     };
     decoder.abort();
@@ -399,42 +521,108 @@ async fn play(conn: Connection, out: Out, id: u64) {
     }
 }
 
-/// Progress for one transfer, at most ~7 events a second plus the last one.
-fn progress(out: Out, id: u64, name: String) -> impl Fn(u64, u64) + Send + Sync {
-    let last: Mutex<Option<Instant>> = Mutex::new(None);
-    move |done, total| {
-        let mut last = last.lock().unwrap();
-        if done >= total || last.is_none_or(|t| t.elapsed() >= Duration::from_millis(150)) {
+/// One transfer's events for the window: progress at most ~7 times a second, then how it ended.
+struct Report {
+    id: u64,
+    out: Out,
+    session: u64,
+    /// The transfer so far, and when the window last heard of it.
+    now: Mutex<(Transfer, Option<Instant>)>,
+}
+
+impl Report {
+    fn new(out: &Out, session: u64, id: u64, what: What) -> Self {
+        let t = Transfer { id, what, done: 0, total: 0, end: None };
+        Self { id, out: out.clone(), session, now: Mutex::new((t, None)) }
+    }
+
+    fn progress(&self, done: u64, total: u64) {
+        let mut now = self.now.lock().unwrap();
+        let (t, last) = &mut *now;
+        (t.done, t.total) = (done, total);
+        if last.is_none_or(|l| l.elapsed() >= Duration::from_millis(150)) {
             *last = Some(Instant::now());
-            out.send(id, ViewEvent::Transfer { name: name.clone(), done, total });
+            self.out.send(self.session, ViewEvent::Transfer(t.clone()));
         }
+    }
+
+    /// It's over; returns its number, what the transfer tasks return.
+    fn end(&self, how: anyhow::Result<String>) -> u64 {
+        let mut t = self.now.lock().unwrap().0.clone();
+        t.done = t.total;
+        t.end = Some(how.map_err(|e| format!("{e:#}")));
+        self.out.send(self.session, ViewEvent::Transfer(t));
+        self.id
     }
 }
 
+/// The last part of a path from either system.
 fn file_name(p: &std::path::Path) -> String {
-    p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned())
+    let s = p.to_string_lossy();
+    s.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(&s).to_string()
 }
 
-async fn upload(conn: Connection, path: PathBuf, out: Out, id: u64) {
-    let name = file_name(&path);
-    let report = progress(out.clone(), id, name.clone());
-    let text = match files::upload(&conn, &path, &report).await {
-        Ok(at) => format!("Sent to {at}"),
-        Err(e) => format!("Couldn't send {name}: {e}"),
-    };
-    out.send(id, ViewEvent::Note(text));
+async fn upload(conn: Connection, path: PathBuf, to: Option<Dest>, r: Report) -> u64 {
+    r.end(files::upload(&conn, &path, to, &|done, total| r.progress(done, total)).await)
 }
 
-async fn download(conn: Connection, remote: String, out: Out, id: u64) {
-    let name = file_name(std::path::Path::new(&remote));
-    let report = progress(out.clone(), id, name.clone());
-    let saved = match files::downloads() {
-        Ok(dir) => files::download(&conn, &remote, &dir, &report).await,
-        Err(e) => Err(e),
+async fn download(conn: Connection, remote: String, r: Report) -> u64 {
+    let saved = async {
+        let dir = files::downloads()?;
+        files::download(&conn, &remote, &dir, &|done, total| r.progress(done, total)).await
     };
-    let text = match saved {
-        Ok(path) => format!("Saved {}", path.display()),
-        Err(e) => format!("Couldn't download {name}: {e}"),
+    r.end(saved.await.map(|p| p.display().to_string()))
+}
+
+/// A new number for each paste: each lands in a fresh folder of its own.
+fn paste_number() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+}
+
+/// Ctrl+V on their screen with files on this computer's clipboard: they go into a fresh folder
+/// over there and onto that clipboard, then the paste goes through.
+async fn paste_there(conn: Connection, paths: Vec<PathBuf>, acks: mpsc::UnboundedSender<Cmd>, r: Report) -> u64 {
+    let sent = async {
+        let n = paste_number();
+        let total = files::size(paths.clone()).await;
+        let (base, last) = (AtomicU64::new(0), AtomicU64::new(0));
+        let mut landed = Vec::new();
+        for p in &paths {
+            let progress = |done, of| {
+                last.store(of, Ordering::Relaxed);
+                r.progress(base.load(Ordering::Relaxed) + done, total);
+            };
+            landed.push(files::upload(&conn, p, Some(Dest::Clipboard(n)), &progress).await?);
+            base.fetch_add(last.swap(0, Ordering::Relaxed), Ordering::Relaxed);
+        }
+        let _ = acks.send(Cmd::Ask(Ask::ClipFiles(landed)));
+        // By now the Ctrl that made the paste may be up: press it again around V.
+        for (code, down) in [(CTRL, true), (V, true), (V, false), (CTRL, false)] {
+            let _ = acks.send(Cmd::Ask(Ask::Input(Input::Key { code, down })));
+        }
+        anyhow::Ok(String::new())
     };
-    out.send(id, ViewEvent::Note(text));
+    r.end(sent.await)
+}
+
+/// Files copied on their computer: into a fresh folder here, then onto this computer's
+/// clipboard, ready to paste.
+async fn copy_here(conn: Connection, paths: Vec<String>, total: u64, acks: mpsc::UnboundedSender<Cmd>, r: Report) -> u64 {
+    let got = async {
+        let n = paste_number();
+        let dir = tokio::task::spawn_blocking(move || files::clipboard_dir(n)).await??;
+        let (base, last) = (AtomicU64::new(0), AtomicU64::new(0));
+        let mut here = Vec::new();
+        for p in &paths {
+            let progress = |done, of| {
+                last.store(of, Ordering::Relaxed);
+                r.progress(base.load(Ordering::Relaxed) + done, total);
+            };
+            here.push(files::download(&conn, p, &dir, &progress).await?);
+            base.fetch_add(last.swap(0, Ordering::Relaxed), Ordering::Relaxed);
+        }
+        let _ = acks.send(Cmd::Clipboard(here));
+        anyhow::Ok(dir.display().to_string())
+    };
+    r.end(got.await)
 }

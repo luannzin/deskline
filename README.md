@@ -58,9 +58,19 @@ is downloaded, and the installed Windows service updates on its own.
 
 The viewer's toolbar has everything else: **Ctrl+Alt+Del**, **Privacy** (blanks their screen and
 locks their own mouse and keyboard), the monitor picker, picture quality, sound, actual size, full
-screen (F11 to leave), **Files** and **Chat**. Drop files on the window to send them; they land in
-the other computer's Downloads. Copy on one computer and paste on the other: the clipboard follows
-while you have control. On Windows every key goes through, Win, Alt+Tab and Print Screen included.
+screen (F11 to leave), **Files** and **Chat**. On Windows every key goes through, Win, Alt+Tab and
+Print Screen included.
+
+**Files** browses their computer: the folders along the way open with a click, Home, Desktop,
+Documents and Downloads are one click from anywhere, and Find narrows a long folder. A double
+click (or Enter) downloads a file into your Downloads. Send files, or drop them on the window, and
+they land in the folder you're looking at (their Downloads when none is open). Each transfer shows
+its progress, can be cancelled, and once it's here, shown in its folder.
+
+Copy on one computer and paste on the other while you have control: text, and files too. Copy files
+here and press Ctrl+V on their screen, and they go over and paste where you are there. Copy files
+there, and they come to your clipboard on their own, ready to paste here (past 256 MB, you're asked
+first).
 
 For games and video, pick **Gaming (120 fps)**: up to 4K at up to 120 frames a second, keeping the
 frame rate and giving up size first when the link or the computer can't keep up. **Capture mouse**
@@ -116,7 +126,7 @@ On Linux and macOS, **Start Deskline when I sign in** keeps it reachable from th
 | Unattended access password | **Settings → Unattended access** |
 | "Install AnyDesk" | **Install Deskline on this computer** |
 | Address book | **Recent**, with names |
-| File manager / clipboard files | **Files** panel to browse their computer and download; drag and drop to upload |
+| File manager / clipboard files | **Files** panel to browse, download and send into any folder; copy files on one computer and paste them on the other |
 | Privacy mode, block input | **Privacy** (Windows 10 2004+) |
 | Ctrl+Alt+Del, switch monitor, quality | In the toolbar |
 | Chat | **Chat** on both sides |

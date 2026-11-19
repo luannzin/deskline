@@ -59,6 +59,9 @@ pub enum Ask {
     /// Ask the host's system again which screens to share and whether input is allowed (its
     /// sharing dialog, on Linux). New in 0.5.
     Reshare,
+    /// Put these files on the host's clipboard: what a paste just uploaded (`files::Dest::
+    /// Clipboard`), so the Ctrl+V that follows pastes them there. New in 0.7.
+    ClipFiles(Vec<String>),
 }
 
 /// Host to viewer.
@@ -74,6 +77,11 @@ pub enum Tell {
     Privacy(bool),
     /// Something to show the viewer ("Privacy mode isn't available on Linux.").
     Note(String),
+    /// The host takes uploads into any folder and files on its clipboard (`Ask::ClipFiles`).
+    /// New in 0.7; older hosts never say it.
+    FileTools,
+    /// Files were copied on the host: where they are there, and how many bytes they come to.
+    ClipFiles { paths: Vec<String>, bytes: u64 },
 }
 
 #[derive(Serialize, Deserialize)]

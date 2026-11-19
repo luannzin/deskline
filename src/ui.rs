@@ -22,7 +22,7 @@ use crate::proto::Ask;
 use crate::settings::{self, Peer, Store};
 use crate::tray::{Tray, TrayMsg};
 use crate::update::{self, Updater};
-use crate::viewer::{self, Cmd, Options, Out, View, ViewEvent};
+use crate::viewer::{self, Cmd, Options, Out, Transfer, View, ViewEvent, What};
 use crate::{autostart, net};
 #[cfg(windows)]
 use crate::{keyhook, service};
@@ -44,6 +44,12 @@ pub struct Start {
 
 /// The reading column, like luannzin.com's.
 const COLUMN: f32 = 560.0;
+/// A file or folder picked to send: the session, the path here, the folder of theirs it goes to.
+type Picked = (u64, PathBuf, Option<String>);
+/// Finished transfers kept in the Files panel, newest first.
+const FINISHED: usize = 5;
+/// The starting places' names as hosts send them, and how they read here.
+const PLACES: [(&str, &str); 4] = [("Home", "Home folder"), ("Desktop", "Desktop"), ("Documents", "Documents"), ("Downloads", "Downloads")];
 /// Every picture setting, in the order they're offered.
 const QUALITIES: [Quality; 4] = [Quality::Balanced, Quality::Sharp, Quality::Smooth, Quality::Gaming];
 /// The evdev code of Z: Ctrl+Alt+Shift+Z gives a captured mouse back (the Windows keyboard hook
@@ -60,7 +66,8 @@ pub struct App {
     service: bool,
     out: Out,
     view_events: mpsc::UnboundedReceiver<(u64, ViewEvent)>,
-    picked: (mpsc::UnboundedSender<(u64, PathBuf)>, mpsc::UnboundedReceiver<(u64, PathBuf)>),
+    /// Files and folders picked to send: the session, the path, the folder of theirs it goes to.
+    picked: (mpsc::UnboundedSender<Picked>, mpsc::UnboundedReceiver<Picked>),
     code: String,
     password_on: bool,
     trusted: Vec<Peer>,
@@ -166,7 +173,14 @@ struct Viewing {
     panel: Panel,
     chat: Chat,
     listing: Option<Listing>,
-    transfers: Vec<(String, u64, u64)>,
+    /// Typed in Find: narrows the folder's rows.
+    find: String,
+    /// Under way first, then the last few finished.
+    transfers: Vec<Transfer>,
+    /// Their computer takes files into any folder and on its clipboard.
+    tools: bool,
+    /// They copied files too big to come over unasked: how many, how many bytes.
+    their_files: Option<(usize, u64)>,
     notes: Vec<String>,
     /// Typed while waiting to be accepted: log in with their password instead.
     password: String,
@@ -363,13 +377,29 @@ impl App {
             }
             ViewEvent::Note(text) => v.note(&t(&text)),
             ViewEvent::Privacy(on) => v.privacy = on,
-            ViewEvent::Listing(l) => v.listing = Some(l),
-            ViewEvent::Transfer { name, done, total } => {
-                v.transfers.retain(|x| x.0 != name);
-                if done < total {
-                    v.transfers.push((name, done, total));
+            ViewEvent::Listing(l) => {
+                if v.listing.as_ref().is_none_or(|old| old.path != l.path) {
+                    v.find.clear();
                 }
+                v.listing = Some(l);
             }
+            ViewEvent::Transfer(tr) => {
+                // Something sent may have landed in the folder on show.
+                let landed = matches!(tr.what, What::Send(_)) && matches!(tr.end, Some(Ok(_)));
+                if let (true, Some(l)) = (landed, &v.listing) {
+                    v.session.cmd(Cmd::List(l.path.clone()));
+                }
+                match v.transfers.iter_mut().find(|x| x.id == tr.id) {
+                    Some(x) => *x = tr,
+                    None => v.transfers.insert(0, tr),
+                }
+                // Under way first, then the newest finished; the oldest finished go.
+                v.transfers.sort_by_key(|x| x.end.is_some());
+                let running = v.transfers.iter().filter(|x| x.end.is_none()).count();
+                v.transfers.truncate(running + FINISHED);
+            }
+            ViewEvent::TheirFiles { count, bytes } => v.their_files = (count > 0).then_some((count, bytes)),
+            ViewEvent::FileTools => v.tools = true,
             ViewEvent::Ended { why, password } => {
                 let peer = v.peer;
                 self.views.remove(i);
@@ -425,7 +455,10 @@ impl App {
             panel: Panel::None,
             chat: Chat::default(),
             listing: None,
+            find: String::new(),
             transfers: Vec::new(),
+            tools: false,
+            their_files: None,
             notes: Vec::new(),
             password: String::new(),
             remember: true,
@@ -876,7 +909,7 @@ impl App {
         let side = egui::Frame::new().fill(GROUND).inner_margin(egui::Margin::same(16)).stroke(egui::Stroke::new(1.0, HAIRLINE));
         match v.panel {
             Panel::Files => {
-                egui::Panel::right("files").frame(side).default_size(320.0).show(ui, |ui| files_panel(ui, v, control, &picked));
+                egui::Panel::right("files").frame(side).default_size(360.0).show(ui, |ui| files_panel(ui, v, control, &picked));
             }
             Panel::Chat => {
                 v.chat.unread = 0;
@@ -889,10 +922,11 @@ impl App {
             Panel::None => {}
         }
 
-        // Files dropped on the window go to their Downloads.
+        // Files dropped on the window go to the folder on show in Files, else their Downloads.
+        let (to, dropping) = (v.send_to(), ui.input(|i| !i.raw.hovered_files.is_empty()));
         if control {
             for f in ui.input(|i| i.raw.dropped_files.clone()) {
-                v.session.cmd(Cmd::Upload(f.path().to_path_buf()));
+                v.session.cmd(Cmd::Upload(f.path().to_path_buf(), to.clone()));
             }
         }
 
@@ -930,9 +964,17 @@ impl App {
                     forward_input(ui, v, rect, response.hovered());
                 }
             }
+            let pasting = v.transfers.iter().find(|x| x.end.is_none() && matches!(x.what, What::PasteThere(_) | What::PasteHere(_)));
             if !v.status.is_empty() {
                 // Reconnecting: say so over the frozen picture.
                 plate(ui, area, v.status.clone());
+            } else if dropping && control {
+                let folder = to.as_deref().map(|p| trail(p).pop().map_or_else(|| p.to_string(), |(name, _)| name));
+                plate(ui, area, folder.map_or_else(|| t("Drop to send to their Downloads"), |f| tf("Drop to send to {}", &[&f])));
+            } else if let Some(x) = pasting {
+                // A paste waits on its files: say so where the eyes are.
+                plate(ui, area, format!("{}  {}", what(&x.what), percent(x)));
+                ui.ctx().request_repaint_after(Duration::from_millis(200));
             } else if let Some(at) = v.captured {
                 // The way out of a captured mouse, for its first seconds.
                 let left = 3.0 - (ui.input(|i| i.time) - at);
@@ -1166,6 +1208,13 @@ impl Viewing {
             self.notes.remove(0);
         }
     }
+
+    /// Where files sent now land: the folder open in Files, when their computer takes that,
+    /// else their Downloads (None).
+    fn send_to(&self) -> Option<String> {
+        let l = self.listing.as_ref().filter(|_| self.tools && self.panel == Panel::Files)?;
+        (!l.path.is_empty()).then(|| l.path.clone())
+    }
 }
 
 /// The session's bar: who, the link drawn as dusk with its kind and round trip, control, the
@@ -1278,6 +1327,15 @@ fn toolbar(ui: &mut egui::Ui, v: &mut Viewing, hang_up: &mut bool) {
         for n in &v.notes {
             ui.label(muted(n));
         }
+        if let Some((count, bytes)) = v.their_files {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(muted(tf("They copied {} ({}).", &[&files_count(count), &size(bytes)])));
+                if quiet(ui, t("Copy to my clipboard")).clicked() {
+                    v.session.cmd(Cmd::CopyTheirs);
+                    v.their_files = None;
+                }
+            });
+        }
     });
 }
 
@@ -1384,18 +1442,132 @@ fn chat_panel(ui: &mut egui::Ui, chat: &mut Chat) -> Option<String> {
     sent
 }
 
-/// Their folders, and sending yours.
-fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc::UnboundedSender<(u64, PathBuf)>) {
+/// Their folders, and sending yours. Top: where you are, as a trail of folders, the starting
+/// places and Find. Middle: the folder's rows. Pinned at the bottom: sending, and the transfers.
+fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc::UnboundedSender<Picked>) {
     if !control {
         ui.label(soft(t("File transfer needs control. Ask for control first.")));
         return;
     }
-    let id = v.session.id;
+    let bottom = egui::Frame::new().inner_margin(egui::Margin { top: 8, ..Default::default() });
+    egui::Panel::bottom(ui.scope_id().with("sending")).frame(bottom).show(ui, |ui| sending(ui, v, picked));
+
+    let Some(listing) = v.listing.clone() else {
+        look::waiting(ui, ui.available_width());
+        return;
+    };
+    // Where you are: "Their computer › home › luan", any part opens it, Refresh at the end.
+    let mut go = None;
     ui.horizontal(|ui| {
-        for folders in [false, true] {
-            let label = if folders { t("Send a folder…") } else { t("Send files…") };
-            if ui.button(label).on_hover_text(t("Lands in their Downloads. You can also drop files on the window.")).clicked() {
-                let tx = picked.clone();
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if quiet(ui, t("Refresh")).clicked() {
+                go = Some(listing.path.clone());
+            }
+            ui.with_layout(Layout::left_to_right(Align::Center).with_main_wrap(true), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let parts = trail(&listing.path);
+                let mut crumb = |ui: &mut egui::Ui, name: String, path: String, here: bool| {
+                    if here {
+                        ui.label(strong(name));
+                    } else if quiet(ui, name).clicked() {
+                        go = Some(path);
+                    }
+                };
+                crumb(ui, t("Their computer"), String::new(), parts.is_empty());
+                let last = parts.len().saturating_sub(1);
+                for (i, (name, path)) in parts.into_iter().enumerate() {
+                    ui.label(muted("›"));
+                    crumb(ui, name, path, i == last);
+                }
+            });
+        });
+    });
+    // The starting places, one click from anywhere.
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for (name, shown) in PLACES {
+            if quiet(ui, t(shown)).clicked() {
+                go = Some(name.into());
+            }
+        }
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(soft(t("Find")));
+        ui.add(TextEdit::singleline(&mut v.find).desired_width(f32::INFINITY).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+    });
+    ui.add_space(8.0);
+    look::hairline(ui);
+    if let Some(path) = go {
+        v.session.cmd(Cmd::List(path));
+    }
+
+    let find = v.find.trim().to_lowercase();
+    let shown: Vec<_> = listing.entries.iter().filter(|e| find.is_empty() || e.name.to_lowercase().contains(&find)).collect();
+    // The row under the pointer or with focus last frame shows Download (rows are sized before
+    // they know).
+    let hot_id = ui.scope_id().with("hot-row");
+    let hot: Option<String> = ui.ctx().data(|d| d.get_temp(hot_id)).flatten();
+    let mut now_hot = None;
+    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        ui.add_space(4.0);
+        if shown.is_empty() {
+            ui.label(soft(if listing.entries.is_empty() { t("This folder is empty.") } else { t("Nothing here matches.") }));
+        }
+        for e in shown {
+            let path = listing.path_of(e);
+            let name = if listing.path.is_empty() { place_name(&e.name) } else { e.name.clone() };
+            let near = hot.as_deref() == Some(path.as_str());
+            let mut download = false;
+            // Every row takes the pointer and the keyboard: a folder opens on a click or Enter,
+            // a file downloads on a double click or Enter.
+            let (row, _) = look::row(ui, Sense::click(), |ui| {
+                ui.horizontal(|ui| {
+                    // As tall with Download as without, so nothing moves.
+                    ui.set_min_height(30.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if near {
+                            download = quiet(ui, t("Download")).on_hover_text(t("Into your Downloads")).clicked();
+                        }
+                        if !e.dir {
+                            ui.label(muted(size(e.size)).monospace());
+                        }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            let name = if e.dir { format!("{name}/") } else { name };
+                            ui.add(egui::Label::new(RichText::new(name).color(INK)).truncate());
+                        });
+                    });
+                })
+            });
+            if row.contains_pointer() || row.has_focus() {
+                now_hot = Some(path.clone());
+            }
+            let enter = row.has_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if download || (!e.dir && (row.double_clicked() || enter)) {
+                v.session.cmd(Cmd::Download(path));
+            } else if e.dir && row.clicked() {
+                v.session.cmd(Cmd::List(path));
+            }
+        }
+    });
+    if now_hot != hot {
+        ui.ctx().data_mut(|d| d.insert_temp(hot_id, now_hot));
+    }
+}
+
+/// The bottom of the Files panel: sending files to the folder on show (or their Downloads), and
+/// each transfer with its progress, Cancel while it runs and Show when it came here.
+fn sending(ui: &mut egui::Ui, v: &mut Viewing, picked: &mpsc::UnboundedSender<Picked>) {
+    look::hairline(ui);
+    ui.add_space(8.0);
+    let to = v.send_to();
+    ui.horizontal_wrapped(|ui| {
+        let (files, folder) = if to.is_some() { (t("Send files here…"), t("Send a folder here…")) } else { (t("Send files…"), t("Send a folder…")) };
+        let lands = if to.is_some() { t("Lands in the folder you're looking at.") } else { t("Lands in their Downloads.") };
+        for (label, folders) in [(files, false), (folder, true)] {
+            let button = if folders { quiet(ui, label) } else { ui.button(label) };
+            if button.on_hover_text(lands.as_str()).clicked() {
+                let (tx, id, to) = (picked.clone(), v.session.id, to.clone());
                 tokio::spawn(async move {
                     let dialog = rfd::AsyncFileDialog::new();
                     let paths: Vec<PathBuf> = if folders {
@@ -1404,56 +1576,117 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
                         dialog.pick_files().await.unwrap_or_default().iter().map(|f| f.path().to_path_buf()).collect()
                     };
                     for p in paths {
-                        let _ = tx.send((id, p));
+                        let _ = tx.send((id, p, to.clone()));
                     }
                 });
             }
         }
     });
-    for (name, done, total) in &v.transfers {
-        ui.add(egui::ProgressBar::new(*done as f32 / (*total).max(1) as f32).text(name.as_str()).fill(look::HOVER));
-    }
-    ui.add_space(8.0);
-    look::hairline(ui);
-    ui.add_space(8.0);
-    let Some(listing) = v.listing.clone() else {
-        look::waiting(ui, ui.available_width());
-        return;
-    };
-    ui.horizontal(|ui| {
-        if ui.add_enabled(!listing.path.is_empty(), egui::Button::new(soft(t("Up"))).frame_when_inactive(false)).clicked() {
-            v.session.cmd(Cmd::List(listing.parent.clone().unwrap_or_default()));
-        }
-        let here = if listing.path.is_empty() { t("Their computer") } else { listing.path.clone() };
-        ui.label(strong(here));
-    });
-    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        if listing.entries.is_empty() {
-            ui.label(soft(t("This folder is empty.")));
-        }
-        for e in &listing.entries {
-            let path = listing.path_of(e);
-            // A folder row opens the folder, by pointer or by Tab and Enter.
-            let (row, _) = look::row(ui, if e.dir { Sense::click() } else { Sense::hover() }, |ui| {
-                ui.horizontal(|ui| {
-                    if e.dir {
-                        ui.label(RichText::new(format!("{}/", e.name)).color(INK));
-                    } else {
-                        ui.label(RichText::new(&e.name).color(INK));
-                        ui.label(muted(size(e.size)));
-                    }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if quiet(ui, t("Download")).on_hover_text(t("Into your Downloads")).clicked() {
-                            v.session.cmd(Cmd::Download(path.clone()));
+    ui.label(muted(t("Or drop them on the window.")));
+    let mut cancel = None;
+    for x in &v.transfers {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                match &x.end {
+                    None => {
+                        if quiet(ui, t("Cancel")).clicked() {
+                            cancel = Some(x.id);
                         }
-                    });
-                })
+                        ui.label(muted(percent(x)).monospace());
+                    }
+                    Some(Ok(at)) => {
+                        if matches!(x.what, What::Get(_))
+                            && quiet(ui, t("Show")).on_hover_text(at.as_str()).clicked()
+                        {
+                            open(std::path::Path::new(at).parent().unwrap_or(std::path::Path::new(at)));
+                        }
+                        let done = match x.what {
+                            What::PasteHere(_) => t("Ready to paste"),
+                            What::PasteThere(_) => t("Pasted"),
+                            _ => t("Done"),
+                        };
+                        ui.label(muted(done));
+                    }
+                    Some(Err(why)) => {
+                        ui.label(muted(t("Failed"))).on_hover_text(t(why));
+                    }
+                }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    ui.add(egui::Label::new(RichText::new(what(&x.what)).color(INK)).truncate());
+                });
             });
-            if row.clicked() {
-                v.session.cmd(Cmd::List(path));
-            }
+        });
+        if x.end.is_none() {
+            // A 2px line: the hairline, filled in soft ink as far as it's got.
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 2.0), Sense::hover());
+            ui.painter().rect_filled(rect, 1.0, HAIRLINE);
+            let done = rect.width() * x.done as f32 / x.total.max(1) as f32;
+            ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(done.min(rect.width()), 2.0)), 1.0, SOFT);
         }
-    });
+    }
+    if let Some(id) = cancel {
+        v.session.cmd(Cmd::Cancel(id));
+        v.transfers.retain(|x| x.id != id);
+    }
+}
+
+/// What a transfer moves, as the panel names it.
+fn what(w: &What) -> String {
+    match w {
+        What::Send(name) | What::Get(name) => name.clone(),
+        What::PasteThere(n) => tf("{} to their clipboard", &[&files_count(*n)]),
+        What::PasteHere(n) => tf("{} to your clipboard", &[&files_count(*n)]),
+    }
+}
+
+/// How far a transfer has got.
+fn percent(x: &Transfer) -> String {
+    format!("{}%", x.done.saturating_mul(100) / x.total.max(1))
+}
+
+fn files_count(n: usize) -> String {
+    if n == 1 { t("1 file") } else { tf("{} files", &[&n.to_string()]) }
+}
+
+/// A starting place's name as it reads here ("Home" is "Home folder").
+fn place_name(name: &str) -> String {
+    PLACES.iter().find(|(n, _)| *n == name).map_or_else(|| name.to_string(), |(_, shown)| t(shown))
+}
+
+/// A folder path on their computer as the folders along it: each one's name and full path.
+/// "/home/luan" is "/", "home", "luan"; "C:\Users" is "C:", "Users"; "\\server\share\x" starts
+/// at the share.
+fn trail(path: &str) -> Vec<(String, String)> {
+    let unix = path.starts_with('/');
+    let sep = if unix { '/' } else { '\\' };
+    let mut parts = Vec::new();
+    let mut at = String::new();
+    let mut rest = path;
+    if unix {
+        parts.push(("/".to_string(), "/".to_string()));
+        at.push('/');
+    } else if let Some(unc) = path.strip_prefix("\\\\") {
+        // The server and share together are the root of a network path.
+        let mut s = unc.splitn(3, '\\');
+        let (server, share) = (s.next().unwrap_or_default(), s.next().unwrap_or_default());
+        at = format!("\\\\{server}\\{share}\\");
+        parts.push((format!("\\\\{server}\\{share}"), at.clone()));
+        rest = s.next().unwrap_or_default();
+    }
+    for name in rest.split(sep).filter(|p| !p.is_empty()) {
+        if at.is_empty() {
+            // A drive: "C:" opens as "C:\".
+            at = format!("{name}{sep}");
+        } else {
+            if !at.ends_with(sep) {
+                at.push(sep);
+            }
+            at.push_str(name);
+        }
+        parts.push((name.to_string(), at.clone()));
+    }
+    parts
 }
 
 fn size(n: u64) -> String {
@@ -1470,8 +1703,11 @@ fn size(n: u64) -> String {
 /// come through here. Windows silently drops a hook that answers slowly once, and then this is
 /// how keys still get there.
 fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool) {
-    // Keep buttons from taking focus, or Space/Enter would press them instead of reaching the remote.
-    if v.panel != Panel::Chat {
+    // Keys go to the remote unless a field (Chat, Find) is being typed in; a click on the
+    // picture takes them back from it. Buttons never keep focus, or Space/Enter would press
+    // them instead of reaching the remote.
+    let typing = ui.ctx().egui_wants_keyboard_input() && !(hovered && ui.input(|i| i.pointer.any_pressed()));
+    if !typing {
         ui.memory_mut(|m| {
             if let Some(id) = m.focused() {
                 m.surrender_focus(id);
@@ -1484,7 +1720,6 @@ fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool) 
         Input::Move { x: n.x, y: n.y }
     };
     let key = |code: u16, down: bool| Ask::Input(Input::Key { code, down });
-    let typing = v.panel == Panel::Chat && ui.memory(|m| m.focused().is_some());
     let captured = v.captured.is_some();
     for e in ui.input(|i| i.events.clone()) {
         match e {
@@ -1526,12 +1761,10 @@ fn forward_input(ui: &mut egui::Ui, v: &mut Viewing, rect: Rect, hovered: bool) 
                 }
             }
             // egui turns Ctrl+C/X/V into these instead of key events; Ctrl is already down remotely.
-            UiEvent::Copy | UiEvent::Cut | UiEvent::Paste(_) => {
-                let code = match e {
-                    UiEvent::Copy => 46,
-                    UiEvent::Cut => 45,
-                    _ => 47,
-                };
+            // A paste may carry files: the session sends them over first (Cmd::Paste).
+            UiEvent::Paste(_) => v.session.cmd(Cmd::Paste),
+            UiEvent::Copy | UiEvent::Cut => {
+                let code = if matches!(e, UiEvent::Copy) { 46 } else { 45 };
                 v.session.send(key(code, true));
                 v.session.send(key(code, false));
             }
@@ -1581,9 +1814,9 @@ impl eframe::App for App {
         while let Ok((id, e)) = self.view_events.try_recv() {
             self.view_event(ctx, id, e);
         }
-        while let Ok((id, path)) = self.picked.1.try_recv() {
+        while let Ok((id, path, to)) = self.picked.1.try_recv() {
             if let Some(v) = self.views.iter().find(|v| v.session.id == id) {
-                v.session.cmd(Cmd::Upload(path));
+                v.session.cmd(Cmd::Upload(path, to));
             }
         }
         self.housekeeping(ctx);
@@ -1628,6 +1861,11 @@ impl eframe::App for App {
                         v.captured = None;
                         continue;
                     }
+                    // Ctrl+V may carry files: the session sends them over first.
+                    if down && code == desktop::V && self.hook_mods == 1 {
+                        v.session.cmd(Cmd::Paste);
+                        continue;
+                    }
                     v.session.send(Ask::Input(Input::Key { code, down }));
                 }
             }
@@ -1667,5 +1905,21 @@ impl eframe::App for App {
             }
         }
         self.prompts(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trails_open_each_folder_along_the_way() {
+        let pairs = |p: &str| trail(p).into_iter().map(|(n, p)| format!("{n}={p}")).collect::<Vec<_>>();
+        assert_eq!(pairs("/home/luan/"), ["/=/", "home=/home", "luan=/home/luan"]);
+        assert_eq!(pairs("/"), ["/=/"]);
+        assert_eq!(pairs("C:\\Users\\luan"), ["C:=C:\\", "Users=C:\\Users", "luan=C:\\Users\\luan"]);
+        assert_eq!(pairs("D:\\"), ["D:=D:\\"]);
+        assert_eq!(pairs("\\\\nas\\share\\docs"), ["\\\\nas\\share=\\\\nas\\share\\", "docs=\\\\nas\\share\\docs"]);
+        assert!(trail("").is_empty());
     }
 }

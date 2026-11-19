@@ -1,6 +1,7 @@
 //! File transfer. The viewer opens one extra QUIC bidirectional stream per operation: list a
-//! folder on the host, upload a file or folder into the host's Downloads, or download a file or
-//! folder from the host. The host serves each stream with `serve`.
+//! folder on the host, upload a file or folder (into the host's Downloads, a folder it listed, or
+//! a fresh folder for a clipboard paste), or download a file or folder from the host. The host
+//! serves each stream with `serve`.
 //!
 //! On a stream the viewer sends one `Req` and the host answers with `Reply`s. A tree (upload or
 //! download) is first announced as `Item`s, parents before children; then each file's bytes
@@ -55,13 +56,26 @@ impl Listing {
 /// Bytes done, bytes total.
 pub type Progress<'a> = &'a (dyn Fn(u64, u64) + Send + Sync);
 
+/// Where an upload lands on the host, other than its Downloads.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum Dest {
+    /// A folder the host listed.
+    Folder(String),
+    /// The fresh folder files pasted from the viewer's clipboard land in; uploads that carry
+    /// the same number are one paste.
+    Clipboard(u64),
+}
+
 /// Viewer to host: the first message on a file stream.
 #[derive(Serialize, Deserialize)]
 enum Req {
     List { path: String },
-    /// The tree being sent; the file bytes follow.
+    /// The tree being sent into Downloads; the file bytes follow.
     Upload(Vec<Item>),
     Download { path: String },
+    /// `Upload`, elsewhere. New in 0.7: older hosts don't take it (the viewer asks only hosts
+    /// that say they do, `Tell::FileTools`).
+    Put { to: Dest, items: Vec<Item> },
 }
 
 /// Host to viewer.
@@ -102,12 +116,16 @@ pub async fn list(conn: &Connection, path: &str) -> anyhow::Result<Listing> {
     }
 }
 
-/// Viewer: send a local file or folder into the host's Downloads. Returns where it landed.
-/// Links and unreadable files inside a folder are left out.
-pub async fn upload(conn: &Connection, local: &Path, progress: Progress<'_>) -> anyhow::Result<String> {
+/// Viewer: send a local file or folder to the host, into `to` or else its Downloads. Returns
+/// where it landed. Links and unreadable files inside a folder are left out.
+pub async fn upload(conn: &Connection, local: &Path, to: Option<Dest>, progress: Progress<'_>) -> anyhow::Result<String> {
     let local = local.to_path_buf();
     let (items, files, _) = blocking(move || walk(&local)).await?;
-    let (mut send, mut recv) = open(conn, &Req::Upload(items)).await?;
+    let req = match to {
+        Some(to) => Req::Put { to, items },
+        None => Req::Upload(items),
+    };
+    let (mut send, mut recv) = open(conn, &req).await?;
     // A host that gives up stops reading, which ends this early; its reply says why. Dropping
     // this future ends the stream short of what was announced, so the host gives up too.
     let _ = send_files(&mut send, &files, progress).await;
@@ -149,17 +167,8 @@ async fn answer(recv: &mut RecvStream) -> anyhow::Result<Reply> {
 pub async fn serve(mut send: SendStream, mut recv: RecvStream) -> anyhow::Result<Option<String>> {
     let answered = match recv_msg(&mut recv).await? {
         Req::List { path } => blocking(move || list_dir(&path)).await.map(|l| (Reply::Listing(l), None)),
-        Req::Upload(items) => {
-            async {
-                // Not as the user: when this runs as SYSTEM, finding the signed-in user's
-                // Downloads takes SYSTEM's rights.
-                let into = tokio::task::spawn_blocking(downloads).await??;
-                let (at, skipped) = recv_tree(&mut recv, &items, &into, &quiet).await?;
-                let name = at.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                anyhow::Ok((Reply::Done(at.display().to_string()), Some(said("Received", &name, skipped))))
-            }
-            .await
-        }
+        Req::Upload(items) => receive(&mut recv, None, &items).await,
+        Req::Put { to, items } => receive(&mut recv, Some(to), &items).await,
         Req::Download { path } => match blocking(move || walk(&resolve(&path)?)).await {
             Ok((items, files, skipped)) => {
                 let name = items[0].path[0].clone();
@@ -186,6 +195,27 @@ pub async fn serve(mut send: SendStream, mut recv: RecvStream) -> anyhow::Result
     }
     let _ = send.finish();
     done
+}
+
+/// Host: an upload into `to`, or Downloads; its reply and the line for the session log.
+async fn receive(recv: &mut RecvStream, to: Option<Dest>, items: &[Item]) -> anyhow::Result<(Reply, Option<String>)> {
+    let into = match to {
+        // Not as the user: when this runs as SYSTEM, finding the signed-in user's Downloads
+        // takes SYSTEM's rights.
+        None => tokio::task::spawn_blocking(downloads).await??,
+        Some(Dest::Folder(path)) => {
+            blocking(move || {
+                let dir = resolve(&path)?;
+                anyhow::ensure!(dir.is_dir(), "{} isn't a folder.", dir.display());
+                Ok(dir)
+            })
+            .await?
+        }
+        Some(Dest::Clipboard(n)) => blocking(move || clipboard_dir(n)).await?,
+    };
+    let (at, skipped) = recv_tree(recv, items, &into, &quiet).await?;
+    let name = at.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    Ok((Reply::Done(at.display().to_string()), Some(said("Received", &name, skipped))))
 }
 
 fn quiet(_: u64, _: u64) {}
@@ -515,6 +545,57 @@ fn as_user<T>(f: impl FnOnce() -> T) -> anyhow::Result<T> {
     Ok(f())
 }
 
+// ---------------------------------------------------------------- clipboard
+
+/// The fresh folder that paste `n`'s files land in (files pasted from the other computer's
+/// clipboard), under this user's cache. Starting a new paste clears the older ones away. Call it
+/// through `blocking`, so on the host it's the signed-in user's.
+pub fn clipboard_dir(n: u64) -> anyhow::Result<PathBuf> {
+    let root = cache()?.join("clipboard");
+    let dir = root.join(n.to_string());
+    if !dir.is_dir() {
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&dir).with_context(|| format!("Couldn't create {}", dir.display()))?;
+    }
+    Ok(dir)
+}
+
+/// Whether `path` is something a paste landed in (`clipboard_dir`): what the viewer may put on
+/// the host's clipboard.
+pub async fn pasted(path: String) -> bool {
+    blocking(move || {
+        let root = cache()?.join("clipboard").canonicalize()?;
+        Ok(Path::new(&path).canonicalize()?.starts_with(root))
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// How many bytes sending `paths` takes (what's readable of them).
+pub async fn size(paths: Vec<PathBuf>) -> u64 {
+    let sizes = move || paths.iter().filter_map(|p| walk(p).ok()).flat_map(|(_, files, _)| files).fold(0u64, |n, f| n.saturating_add(f.1));
+    let walked = blocking(move || Ok(sizes()));
+    walked.await.unwrap_or(u64::MAX)
+}
+
+/// This user's cache folder for Deskline.
+fn cache() -> anyhow::Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = tests::DOWNLOADS.get() {
+        return Ok(dir.join(".cache"));
+    }
+    #[cfg(windows)]
+    let base = known_folder(&windows::Win32::UI::Shell::FOLDERID_LocalAppData)?;
+    #[cfg(not(windows))]
+    let base = {
+        let home = || std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
+        let xdg = std::env::var_os("XDG_CACHE_HOME").filter(|c| !c.is_empty()).map(PathBuf::from);
+        let base = if cfg!(target_os = "macos") { home().map(|h| h.join("Library/Caches")) } else { xdg.or_else(|| home().map(|h| h.join(".cache"))) };
+        base.context("Couldn't find your cache folder.")?
+    };
+    Ok(base.join("Deskline"))
+}
+
 // ---------------------------------------------------------------- places
 
 /// This user's Downloads folder (on the host: the signed-in user's).
@@ -725,13 +806,13 @@ mod tests {
         assert!(list(&conn, "somewhere/relative").await.is_err());
 
         // Uploads land in Downloads; the same name again gets " (1)".
-        let at = upload(&conn, &mine.join("report.pdf"), &progress).await.unwrap();
+        let at = upload(&conn, &mine.join("report.pdf"), None, &progress).await.unwrap();
         assert_eq!(PathBuf::from(&at), host_dl.join("report.pdf"));
         assert_eq!(*last.lock().unwrap(), (200_000, 200_000));
-        let again = upload(&conn, &mine.join("report.pdf"), &progress).await.unwrap();
+        let again = upload(&conn, &mine.join("report.pdf"), None, &progress).await.unwrap();
         assert_eq!(PathBuf::from(&again), host_dl.join("report (1).pdf"));
         assert_eq!(fs::read(&again).unwrap(), big);
-        let photos = upload(&conn, &mine.join("Photos"), &progress).await.unwrap();
+        let photos = upload(&conn, &mine.join("Photos"), None, &progress).await.unwrap();
         assert_eq!(tree(Path::new(&photos)), tree(&mine.join("Photos")));
 
         // Downloads back, same rules on this side.
@@ -742,6 +823,21 @@ mod tests {
         assert_eq!(fs::read(download(&conn, &at, &got, &progress).await.unwrap()).unwrap(), big);
         let e = download(&conn, &s(&host_dl.join("missing")), &got, &progress).await.unwrap_err();
         assert!(e.to_string().contains("Couldn't open"), "{e}");
+
+        // Into the folder on show; a folder that isn't there is refused.
+        let into = upload(&conn, &mine.join("Photos").join("a.txt"), Some(Dest::Folder(s(&got))), &progress).await.unwrap();
+        assert_eq!(PathBuf::from(&into), got.join("a.txt"));
+        assert!(upload(&conn, &mine.join("report.pdf"), Some(Dest::Folder(s(&got.join("nowhere")))), &progress).await.is_err());
+
+        // A paste's files share a fresh folder, the only things that may go on the clipboard;
+        // the next paste clears it away.
+        let file = upload(&conn, &mine.join("report.pdf"), Some(Dest::Clipboard(7)), &progress).await.unwrap();
+        let folder = upload(&conn, &mine.join("Photos"), Some(Dest::Clipboard(7)), &progress).await.unwrap();
+        assert_eq!(Path::new(&file).parent(), Path::new(&folder).parent(), "one paste, one folder");
+        assert!(pasted(file.clone()).await && pasted(folder).await);
+        assert!(!pasted(s(&mine.join("report.pdf"))).await, "nothing else goes on the clipboard");
+        let next = upload(&conn, &mine.join("report.pdf"), Some(Dest::Clipboard(8)), &progress).await.unwrap();
+        assert!(!Path::new(&file).exists() && Path::new(&next).exists());
 
         // A hostile viewer: names never leave Downloads...
         let at = raw(&conn, vec![item(&["../../evil"], Some(3))], &[frame(b"bad"), frame(b"")].concat()).await.unwrap();
@@ -774,7 +870,7 @@ mod tests {
         fs::write(mine.join("big.bin"), vec![7; 4 << 20]).unwrap();
         let slow = |_: u64, _: u64| std::thread::sleep(Duration::from_millis(5));
         let (part, local, remote) = (host_dl.join("big.bin.part"), mine.join("big.bin"), s(&mine.join("big.bin")));
-        let up = Box::pin(upload(&conn, &local, &slow));
+        let up = Box::pin(upload(&conn, &local, None, &slow));
         tokio::select! {
             _ = up => panic!("the upload finished before it could be cancelled"),
             _ = wait("the host's .part", || part.exists()) => {}
@@ -794,7 +890,7 @@ mod tests {
         assert_eq!(beside, ["got", "host-downloads", "mine"]);
         let mut landed: Vec<_> = fs::read_dir(&host_dl).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
         landed.sort();
-        assert_eq!(landed, [".._.._evil", "C__x", "Photos", "report (1).pdf", "report.pdf"]);
+        assert_eq!(landed, [".._.._evil", ".cache", "C__x", "Photos", "report (1).pdf", "report.pdf"]);
         conn.close(0u8.into(), b"bye");
         let _ = fs::remove_dir_all(&root);
     }

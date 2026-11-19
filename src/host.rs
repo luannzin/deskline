@@ -131,7 +131,8 @@ enum Cmd {
     Replaced,
     /// The capture was chosen again: the monitors, and whether input works, may differ.
     Screens,
-    Note(String),
+    /// Pass this on to the viewer.
+    Tell(Tell),
 }
 
 struct Answer {
@@ -242,7 +243,7 @@ impl Host {
     async fn reshare(self: Arc<Self>, by: Option<u64>) {
         let Ok(_one) = self.resharing.try_lock() else {
             if let Some(id) = by {
-                self.to(id, Cmd::Note("They're already choosing what to share.".into()));
+                self.to(id, Cmd::Tell(Tell::Note("They're already choosing what to share.".into())));
             }
             return;
         };
@@ -264,7 +265,7 @@ impl Host {
             Err(e) => {
                 *self.declined.lock().unwrap() = Some(Instant::now());
                 if let Some(id) = by {
-                    self.to(id, Cmd::Note(format!("Nothing changed on their side: {e}")));
+                    self.to(id, Cmd::Tell(Tell::Note(format!("Nothing changed on their side: {e}"))));
                 }
             }
         }
@@ -493,6 +494,7 @@ impl Host {
             (s.monitors(), s.current())
         };
         send_msg(send, &Tell::Monitors { list, current }).await?;
+        send_msg(send, &Tell::FileTools).await?;
 
         let video = conn.open_uni().await?;
         let _ = video.set_priority(VIDEO_PRIORITY);
@@ -548,6 +550,21 @@ impl Host {
                             c.set(text);
                         }
                     }
+                    // Only what a paste landed in: the viewer can't point this clipboard at
+                    // anything else on this computer.
+                    Some(Ask::ClipFiles(paths)) if *control => {
+                        let mut ok = !paths.is_empty();
+                        for p in &paths {
+                            ok = ok && files::pasted(p.clone()).await;
+                        }
+                        let set = match &clipboard {
+                            Some(c) if ok => c.set_files(paths.into_iter().map(PathBuf::from).collect()).await,
+                            _ => false,
+                        };
+                        if !set {
+                            send_msg(send, &Tell::Note("Their clipboard didn't take the files.".into())).await?;
+                        }
+                    }
                     Some(Ask::Chat(text)) => self.send(HostEvent::Chat { id, text: proto::clean_chat(&text) }),
                     Some(Ask::Sound(on)) => {
                         sound = None;
@@ -595,7 +612,19 @@ impl Host {
                         Some(_) => End::Lost("Connection lost.".into()),
                     },
                 },
-                Some(text) = clip::changed(&mut clipboard) => send_msg(send, &Tell::Clip(text)).await?,
+                Some(change) = clip::changed(&mut clipboard) => match change {
+                    clip::Change::Text(text) => send_msg(send, &Tell::Clip(text)).await?,
+                    clip::Change::Files(paths) if paths.is_empty() => {}
+                    // Sizing a copied folder walks it: off this loop.
+                    clip::Change::Files(paths) => {
+                        let host = self.clone();
+                        tokio::spawn(async move {
+                            let shown = paths.iter().map(|p| p.display().to_string()).collect();
+                            let bytes = files::size(paths).await;
+                            host.to(id, Cmd::Tell(Tell::ClipFiles { paths: shown, bytes }));
+                        });
+                    }
+                },
                 Some(packet) = next_sound(&mut sound) => {
                     // Too big or the link is full: that bit of sound is gone, which is fine.
                     let _ = conn.send_datagram(packet.into());
@@ -627,7 +656,7 @@ impl Host {
                         send_msg(send, &Tell::Control(on)).await?;
                     }
                     Some(Cmd::Chat(text)) => send_msg(send, &Tell::Chat(text)).await?,
-                    Some(Cmd::Note(text)) => send_msg(send, &Tell::Note(text)).await?,
+                    Some(Cmd::Tell(t)) => send_msg(send, &t).await?,
                     Some(Cmd::Screens) => {
                         let s = screen.lock().await;
                         let (list, current, input) = (s.monitors(), s.current(), s.input_allowed());
@@ -871,6 +900,7 @@ mod tests {
         next_view(&mut viewer, "viewing", |e| matches!(e, ViewEvent::Viewing { who, control: false } if who == "host")).await;
         let ViewEvent::Monitors { list, current } = next_view(&mut viewer, "monitors", |e| matches!(e, ViewEvent::Monitors { .. })).await else { unreachable!() };
         assert_eq!((list.len(), current), (2, 0));
+        next_view(&mut viewer, "file tools", |e| matches!(e, ViewEvent::FileTools)).await;
         let mut pictures = 0;
         timeout(Duration::from_secs(15), async {
             while pictures < 10 {
@@ -920,12 +950,37 @@ mod tests {
         cmd_tx.send(HostCmd::Chat { id, text: "hello".into() }).unwrap();
         next_view(&mut viewer, "chat back", |e| matches!(e, ViewEvent::Chat(t) if t == "hello")).await;
 
+        // A paste with no files on this clipboard is just Ctrl+V over there; a file sent into a
+        // folder of theirs lands there and says so.
+        let before = INJECTED.lock().unwrap().len();
+        v.cmd(viewer::Cmd::Paste);
+        let paste = [Input::Key { code: 47, down: true }, Input::Key { code: 47, down: false }];
+        timeout(Duration::from_secs(5), async {
+            while INJECTED.lock().unwrap()[before..] != paste {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the paste never got there");
+        let (sent, into) = (dir.join("sent.txt"), dir.join("into"));
+        std::fs::create_dir_all(&into).unwrap();
+        std::fs::write(&sent, b"hello").unwrap();
+        v.cmd(viewer::Cmd::Upload(sent, Some(into.display().to_string())));
+        let ViewEvent::Transfer(t) = next_view(&mut viewer, "sent", |e| matches!(e, ViewEvent::Transfer(t) if t.end.is_some())).await else { unreachable!() };
+        assert_eq!(t.end, Some(Ok(into.join("sent.txt").display().to_string())));
+        assert_eq!(std::fs::read(into.join("sent.txt")).unwrap(), b"hello");
+
         // Taking control back releases the held key; stopping ends it for good.
         cmd_tx.send(HostCmd::AllowControl { id, yes: false }).unwrap();
         next_view(&mut viewer, "control off", |e| matches!(e, ViewEvent::Control(false))).await;
         let injected = INJECTED.lock().unwrap().clone();
-        let last_key = injected.iter().rev().find(|i| matches!(i, Input::Key { .. }));
-        assert_eq!(last_key, Some(&Input::Key { code: 30, down: false }), "{injected:?}");
+        let mut held = std::collections::HashSet::new();
+        for i in &injected {
+            if let Input::Key { code, down } = *i {
+                if down { held.insert(code) } else { held.remove(&code) };
+            }
+        }
+        assert!(held.is_empty(), "keys left down {held:?}: {injected:?}");
         cmd_tx.send(HostCmd::Stop { id }).unwrap();
         let ViewEvent::Ended { why, .. } = next_view(&mut viewer, "end", |e| matches!(e, ViewEvent::Ended { .. })).await else { unreachable!() };
         assert_eq!(why, "They stopped sharing.");
