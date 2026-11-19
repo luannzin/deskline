@@ -459,7 +459,7 @@ fn connect(
             for y in 0..h {
                 px.extend_from_slice(&src[offset + y * stride..][..w * 4]);
             }
-            s.pool.send(&s.frames, Frame { w, h, bgra, px });
+            s.pool.send(&s.frames, Frame { w, h, bgra, px, gpu: None });
         })
         .register()?;
 

@@ -31,7 +31,7 @@ impl Screen {
                         px[(y * w + x) * 4..][..4].copy_from_slice(&[255, 255, 255, 255]);
                     }
                 }
-                tx.send_replace(Some(Arc::new(Frame { w, h, bgra: true, px })));
+                tx.send_replace(Some(Arc::new(Frame { w, h, bgra: true, px, gpu: None })));
                 tokio::time::sleep(Duration::from_millis(33)).await;
             }
         });

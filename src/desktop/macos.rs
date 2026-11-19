@@ -391,7 +391,7 @@ fn copy(s: &IOSurfaceRef) -> Option<Frame> {
     }
     // SAFETY: matches the lock above.
     unsafe { s.unlock(IOSurfaceLockOptions::ReadOnly, std::ptr::null_mut()) };
-    (w > 0 && px.len() == w * h * 4).then(|| Frame { w, h, bgra: true, px })
+    (w > 0 && px.len() == w * h * 4).then(|| Frame { w, h, bgra: true, px, gpu: None })
 }
 
 /// Where the pointer is now: clicks land there.

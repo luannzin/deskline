@@ -190,7 +190,7 @@ fn capture(
         let started = Instant::now();
         let r = rects[current.load(Ordering::Relaxed)];
         let px = grab(&conn, root, r, shm.as_ref(), &mut pool)?;
-        let mut frame = Frame { w: r.w.into(), h: r.h.into(), bgra: true, px };
+        let mut frame = Frame { w: r.w.into(), h: r.h.into(), bgra: true, px, gpu: None };
         if cursor {
             let c = conn.xfixes_get_cursor_image()?.reply()?;
             let x = i32::from(c.x) - i32::from(c.xhot) - i32::from(r.x);
@@ -332,14 +332,14 @@ mod tests {
 
     #[test]
     fn cursor_blends_and_clips() {
-        let mut f = Frame { w: 3, h: 2, bgra: true, px: vec![100; 3 * 2 * 4] };
+        let mut f = Frame { w: 3, h: 2, bgra: true, px: vec![100; 3 * 2 * 4], gpu: None };
         // 2x2 cursor at (2, -1): only its bottom-left pixel (opaque red) lands, on (2, 0).
         let red = 0xff_ff_00_00;
         let half_white = 0x80_80_80_80;
         draw_cursor(&mut f, 2, -1, 2, &[half_white, half_white, red, 0]);
         assert_eq!(&f.px[8..12], &[0, 0, 255, 100]);
         // Half-transparent white over 100: 128 + 100 * 127 / 255 = 177.
-        let mut g = Frame { w: 1, h: 1, bgra: true, px: vec![100; 4] };
+        let mut g = Frame { w: 1, h: 1, bgra: true, px: vec![100; 4], gpu: None };
         draw_cursor(&mut g, 0, 0, 1, &[half_white]);
         assert_eq!(&g.px[..3], &[177, 177, 177]);
         // Everything else untouched.

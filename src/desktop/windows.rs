@@ -22,7 +22,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Interface, w};
 
-use super::{Frame, Input, Monitor, Pool, gap};
+use super::{Frame, Gpu, Input, Monitor, Pool, gap};
 use crate::keyhook;
 
 /// Only channels, atomics and plain data: it's shared across tokio tasks. Windows, desktops and
@@ -358,17 +358,28 @@ fn capture(tx: watch::Sender<Option<Arc<Frame>>>, shared: Arc<Shared>, ready: on
     }
 }
 
+/// The pointer's patch of the picture is at most this square; a bigger pointer is cut off.
+const PATCH: u32 = 256;
+
+/// One monitor's duplication. Pictures stay on the GPU: each frame is a texture of its own (the
+/// desktop, then the pointer drawn over its patch), which an encoder on this GPU converts and
+/// encodes there (codec/mf.rs), and others read back (`Gpu::read`).
 struct Dup {
+    device: ID3D11Device,
     ctx: ID3D11DeviceContext,
     dup: IDXGIOutputDuplication,
-    staging: ID3D11Texture2D,
+    /// The last desktop picture, without the pointer.
+    desk: ID3D11Texture2D,
+    /// CPU-readable, whole pictures, for `Gpu::read`.
+    staging: Arc<Mutex<ID3D11Texture2D>>,
+    /// CPU-readable `PATCH` square: the desktop under the pointer.
+    patch: ID3D11Texture2D,
     w: usize,
     h: usize,
     rect: RECT,
-    /// The last desktop picture, without the pointer.
-    desk: Vec<u8>,
     fresh: bool,
     pointer: Pointer,
+    /// Frame textures, reused once no session holds them.
     pool: Pool,
 }
 
@@ -379,43 +390,41 @@ impl Dup {
             .find(|o| o.2.DeviceName == *device)
             .ok_or_else(|| anyhow::anyhow!("That screen is no longer connected."))?;
         unsafe {
-            let (mut device, mut ctx) = (None, None);
-            D3D11CreateDevice(
-                &adapter,
-                D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut ctx),
-            )?;
-            let (device, ctx) = (device.expect("device"), ctx.expect("context"));
+            // Video support lets the encoder use this device's video processor; a driver
+            // without it still captures.
+            let video = D3D11_CREATE_DEVICE_FLAG(D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0);
+            let create = |flags| {
+                let (mut device, mut ctx) = (None, None);
+                D3D11CreateDevice(
+                    &adapter,
+                    D3D_DRIVER_TYPE_UNKNOWN,
+                    HMODULE::default(),
+                    flags,
+                    None,
+                    D3D11_SDK_VERSION,
+                    Some(&mut device),
+                    None,
+                    Some(&mut ctx),
+                )
+                .map(|()| (device.expect("device"), ctx.expect("context")))
+            };
+            let (device, ctx) = create(video).or_else(|_| create(D3D11_CREATE_DEVICE_BGRA_SUPPORT))?;
+            // Frames are read and encoded on other threads than this one.
+            let _ = ctx.cast::<ID3D11Multithread>()?.SetMultithreadProtected(true);
             let dup = output.cast::<IDXGIOutput1>()?.DuplicateOutput(&device)?;
             let mode = dup.GetDesc().ModeDesc;
-            let desc_tex = D3D11_TEXTURE2D_DESC {
-                Width: mode.Width,
-                Height: mode.Height,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0,
-            };
-            let mut staging = None;
-            device.CreateTexture2D(&desc_tex, None, Some(&mut staging))?;
+            let (w, h) = (mode.Width, mode.Height);
+            let readable = |w, h| texture(&device, w, h, D3D11_USAGE_STAGING, 0, D3D11_CPU_ACCESS_READ.0 as u32);
             Ok(Dup {
+                desk: texture(&device, w, h, D3D11_USAGE_DEFAULT, FRAME_BIND, 0)?,
+                staging: Arc::new(Mutex::new(readable(w, h)?)),
+                patch: readable(PATCH, PATCH)?,
+                device,
                 ctx,
                 dup,
-                staging: staging.expect("texture"),
-                w: mode.Width as usize,
-                h: mode.Height as usize,
+                w: w as usize,
+                h: h as usize,
                 rect: desc.DesktopCoordinates,
-                desk: Vec::new(),
                 fresh: true,
                 pointer: Pointer::default(),
                 pool: Pool::default(),
@@ -436,30 +445,69 @@ impl Dup {
             let pointer = info.LastMouseUpdateTime != 0 && self.pointer.update(&self.dup, &info)?;
             if desktop {
                 let tex: ID3D11Texture2D = res.expect("frame").cast()?;
-                self.ctx.CopyResource(&self.staging, &tex);
-            }
-            self.dup.ReleaseFrame()?;
-            if desktop {
-                let mut map = D3D11_MAPPED_SUBRESOURCE::default();
-                self.ctx.Map(&self.staging, 0, D3D11_MAP_READ, 0, Some(&mut map))?;
-                let pitch = map.RowPitch as usize;
-                let src = std::slice::from_raw_parts(map.pData as *const u8, pitch * self.h);
-                self.desk.clear();
-                for y in 0..self.h {
-                    self.desk.extend_from_slice(&src[y * pitch..][..self.w * 4]);
-                }
-                self.ctx.Unmap(&self.staging, 0);
+                self.ctx.CopyResource(&self.desk, &tex);
                 self.fresh = false;
             }
+            self.dup.ReleaseFrame()?;
             if !desktop && !pointer {
                 return Ok(None);
             }
-            let mut px = self.pool.take(self.desk.len());
-            px.extend_from_slice(&self.desk);
-            self.pointer.draw(&mut px, self.w, self.h);
-            Ok(Some(Frame { w: self.w, h: self.h, bgra: true, px }))
+            let out = match self.pool.reuse().and_then(|f| f.gpu) {
+                Some(g) => g.tex,
+                None => texture(&self.device, self.w as u32, self.h as u32, D3D11_USAGE_DEFAULT, FRAME_BIND, 0)?,
+            };
+            self.ctx.CopyResource(&out, &self.desk);
+            self.overlay(&out)?;
+            let gpu = Some(Gpu::new(out, self.staging.clone()));
+            Ok(Some(Frame { w: self.w, h: self.h, bgra: true, px: Vec::new(), gpu }))
         }
     }
+
+    /// The pointer over `out`: the patch of desktop under it comes back to memory, gets the
+    /// pointer drawn the way Windows draws it, and goes up again. A few KB a frame, not the
+    /// whole picture.
+    unsafe fn overlay(&self, out: &ID3D11Texture2D) -> windows::core::Result<()> {
+        let Some((x, y, w, h)) = self.pointer.area(self.w, self.h) else { return Ok(()) };
+        let area = D3D11_BOX { left: x, top: y, front: 0, right: x + w, bottom: y + h, back: 1 };
+        let (w, h) = (w as usize, h as usize);
+        unsafe {
+            self.ctx.CopySubresourceRegion(&self.patch, 0, 0, 0, 0, &self.desk, 0, Some(&area));
+            let mut map = D3D11_MAPPED_SUBRESOURCE::default();
+            self.ctx.Map(&self.patch, 0, D3D11_MAP_READ, 0, Some(&mut map))?;
+            let pitch = map.RowPitch as usize;
+            let src = std::slice::from_raw_parts(map.pData as *const u8, pitch * h);
+            let mut px = Vec::with_capacity(w * h * 4);
+            for row in 0..h {
+                px.extend_from_slice(&src[row * pitch..][..w * 4]);
+            }
+            self.ctx.Unmap(&self.patch, 0);
+            self.pointer.draw(&mut px, w, h, POINT { x: x as i32, y: y as i32 });
+            self.ctx.UpdateSubresource(out, 0, Some(&area), px.as_ptr().cast(), (w * 4) as u32, 0);
+        }
+        Ok(())
+    }
+}
+
+/// Frame textures: copied into, read by the video processor, and sampled.
+const FRAME_BIND: u32 = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
+
+/// A BGRA texture on `device`.
+unsafe fn texture(device: &ID3D11Device, w: u32, h: u32, usage: D3D11_USAGE, bind: u32, cpu: u32) -> windows::core::Result<ID3D11Texture2D> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: w,
+        Height: h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: usage,
+        BindFlags: bind,
+        CPUAccessFlags: cpu,
+        MiscFlags: 0,
+    };
+    let mut tex = None;
+    unsafe { device.CreateTexture2D(&desc, None, Some(&mut tex))? };
+    Ok(tex.expect("texture"))
 }
 
 /// The mouse pointer: DXGI leaves it out of the picture and reports it separately.
@@ -488,24 +536,41 @@ impl Pointer {
         Ok(true)
     }
 
-    /// Draw the pointer over a BGRA picture the way Windows does on screen.
-    fn draw(&self, px: &mut [u8], w: usize, h: usize) {
+    /// Monochrome shapes are an AND mask above an XOR mask, so half as tall as they say.
+    fn rows(&self) -> u32 {
+        let i = &self.info;
+        if i.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32 { i.Height / 2 } else { i.Height }
+    }
+
+    /// Where it's drawn on a `w`x`h` monitor, at most `PATCH` square: x, y, width, height.
+    fn area(&self, w: usize, h: usize) -> Option<(u32, u32, u32, u32)> {
+        if !self.visible || self.shape.is_empty() {
+            return None;
+        }
+        let (x0, y0) = (self.at.x.max(0), self.at.y.max(0));
+        let x1 = (self.at.x + self.info.Width as i32).min(w as i32).min(x0 + PATCH as i32);
+        let y1 = (self.at.y + self.rows() as i32).min(h as i32).min(y0 + PATCH as i32);
+        (x1 > x0 && y1 > y0).then(|| (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
+    }
+
+    /// Draw the pointer the way Windows does on screen, over a `w`x`h` BGRA patch of the
+    /// monitor whose top left is `origin`.
+    fn draw(&self, px: &mut [u8], w: usize, h: usize, origin: POINT) {
         let i = &self.info;
         if !self.visible || self.shape.is_empty() {
             return;
         }
         let mono = i.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0 as u32;
         let color = i.Type == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0 as u32;
-        // Monochrome: an AND mask above an XOR mask, one bit per pixel.
-        let rows = if mono { i.Height / 2 } else { i.Height } as usize;
+        let rows = self.rows() as usize;
         let pitch = i.Pitch as usize;
         for sy in 0..rows {
-            let y = self.at.y + sy as i32;
+            let y = self.at.y - origin.y + sy as i32;
             if y < 0 || y >= h as i32 {
                 continue;
             }
             for sx in 0..i.Width as usize {
-                let x = self.at.x + sx as i32;
+                let x = self.at.x - origin.x + sx as i32;
                 if x < 0 || x >= w as i32 {
                     continue;
                 }

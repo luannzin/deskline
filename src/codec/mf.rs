@@ -1,6 +1,10 @@
 //! The GPU's H.264 encoder through Media Foundation: NVENC, Quick Sync and AMF all register as
 //! hardware encoder MFTs. Hardware MFTs are always asynchronous: they ask for input and announce
 //! output with events, which we poll so a stuck driver can't hang the stream.
+//!
+//! Given the capture's GPU, the encoder works there end to end: the video processor scales each
+//! captured texture and converts it to NV12, and the encoder reads that texture. No pixel goes
+//! through memory. Otherwise it takes NV12 pictures from memory.
 use std::mem::ManuallyDrop;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -8,7 +12,10 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use openh264::formats::{YUVBuffer, YUVSource};
 use openh264::nal_units;
-use windows::Win32::Foundation::S_OK;
+use windows::Win32::Foundation::{LUID, S_OK};
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::Common::*;
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::Win32::System::Variant::VARIANT;
@@ -34,6 +41,8 @@ pub struct Encoder {
     /// The stream's SPS and PPS, put back in front of keyframes that come without them.
     headers: Vec<u8>,
     pub name: String,
+    /// Pictures come as textures on this GPU (`encode_gpu`) rather than from memory.
+    gpu: Option<Convert>,
 }
 
 // Everything lives in the multithreaded apartment (`com()` runs first on every thread that
@@ -56,15 +65,16 @@ fn startup() -> anyhow::Result<()> {
 
 impl Encoder {
     /// The first hardware encoder that takes NV12 at `w`x`h` and `fps` and gives Constrained
-    /// Baseline H.264 at a constant `bps`, with no frames held back.
-    pub fn new(w: usize, h: usize, bps: u32, fps: u32) -> anyhow::Result<Self> {
+    /// Baseline H.264 at a constant `bps`, with no frames held back. With `gpu`, only encoders
+    /// on that GPU that can read its textures.
+    pub fn new(w: usize, h: usize, bps: u32, fps: u32, gpu: Option<&ID3D11Device>) -> anyhow::Result<Self> {
         com();
         startup()?;
         let video = |subtype| MFT_REGISTER_TYPE_INFO { guidMajorType: MFMediaType_Video, guidSubtype: subtype };
         let (input, output) = (video(MFVideoFormat_NV12), video(MFVideoFormat_H264));
         let flags = MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0);
         let (mut list, mut n) = (std::ptr::null_mut(), 0);
-        let found: Vec<IMFActivate> = unsafe {
+        let mut found: Vec<IMFActivate> = unsafe {
             MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, flags, Some(&raw const input), Some(&raw const output), &mut list, &mut n)?;
             if list.is_null() {
                 Vec::new()
@@ -74,11 +84,15 @@ impl Encoder {
                 found
             }
         };
-        anyhow::ensure!(!found.is_empty(), "no hardware H.264 encoder on this computer");
+        if let Some(device) = gpu {
+            let luid = unsafe { device.cast::<IDXGIDevice>()?.GetAdapter()?.GetDesc()?.AdapterLuid };
+            found.retain(|a| on_adapter(a, luid));
+        }
+        anyhow::ensure!(!found.is_empty(), "no hardware H.264 encoder on this computer{}", if gpu.is_some() { "'s capturing GPU" } else { "" });
         let mut why = Vec::new();
         for a in found {
             let name = name(&a);
-            match Self::open(a, name.clone(), w, h, bps, fps) {
+            match Self::open(a, name.clone(), w, h, bps, fps, gpu) {
                 Ok(e) => return Ok(e),
                 Err(e) => why.push(format!("{name}: {e:#}")),
             }
@@ -86,26 +100,43 @@ impl Encoder {
         anyhow::bail!("{}", why.join("; "))
     }
 
-    fn open(activate: IMFActivate, name: String, w: usize, h: usize, bps: u32, fps: u32) -> anyhow::Result<Self> {
+    fn open(activate: IMFActivate, name: String, w: usize, h: usize, bps: u32, fps: u32, gpu: Option<&ID3D11Device>) -> anyhow::Result<Self> {
         let mft: IMFTransform = unsafe { activate.ActivateObject()? };
         let (Ok(events), Ok(codec)) = (mft.cast::<IMFMediaEventGenerator>(), mft.cast::<ICodecAPI>()) else {
             unsafe { activate.ShutdownObject()? };
             anyhow::bail!("no event generator or ICodecAPI");
         };
-        let mut enc =
-            Self { activate, mft, events, codec, ids: (0, 0), w, h, fps, frames: 0, wants: 0, headers: Vec::new(), name };
+        let mut enc = Self {
+            activate,
+            mft,
+            events,
+            codec,
+            ids: (0, 0),
+            w,
+            h,
+            fps,
+            frames: 0,
+            wants: 0,
+            headers: Vec::new(),
+            name,
+            gpu: None,
+        };
         // On failure the drop shuts it down.
-        enc.configure(bps)?;
+        enc.configure(bps, gpu)?;
         Ok(enc)
     }
 
-    fn configure(&mut self, bps: u32) -> anyhow::Result<()> {
+    fn configure(&mut self, bps: u32, gpu: Option<&ID3D11Device>) -> anyhow::Result<()> {
         let (w, h, fps) = (self.w as u64, self.h as u64, u64::from(self.fps));
         unsafe {
             let attrs = self.mft.GetAttributes()?;
             anyhow::ensure!(attrs.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) == 1, "not asynchronous");
             attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
             let _ = attrs.SetUINT32(&MF_LOW_LATENCY, 1);
+            // The GPU comes before the media types: they're checked against it.
+            if let Some(device) = gpu {
+                self.gpu = Some(Convert::attach(&self.mft, &attrs, device, self.w as u32, self.h as u32)?);
+            }
             let (mut i, mut o) = ([0u32], [0u32]);
             // E_NOTIMPL means the ids are simply 0.
             if self.mft.GetStreamIDs(&mut i, &mut o).is_ok() {
@@ -162,9 +193,24 @@ impl Encoder {
         self.set(&CODECAPI_AVEncCommonMeanBitRate, bps).is_ok()
     }
 
-    /// One picture in, its H.264 out. Errors if the encoder holds the picture back.
+    /// One picture from memory in, its H.264 out. Errors if the encoder holds the picture back.
     pub fn encode(&mut self, yuv: &YUVBuffer, key: bool) -> anyhow::Result<Vec<u8>> {
         com();
+        let sample = self.sample(yuv)?;
+        self.push(sample, key)
+    }
+
+    /// One BGRA texture from the capturing GPU in, any size: scaled and converted to NV12 there.
+    pub fn encode_gpu(&mut self, picture: &ID3D11Texture2D, key: bool) -> anyhow::Result<Vec<u8>> {
+        com();
+        let size = (self.w as u32, self.h as u32);
+        let gpu = self.gpu.as_mut().context("this encoder takes pictures from memory")?;
+        gpu.convert(picture, size)?;
+        let sample = gpu.sample()?;
+        self.push(sample, key)
+    }
+
+    fn push(&mut self, sample: IMFSample, key: bool) -> anyhow::Result<Vec<u8>> {
         let deadline = Instant::now() + PATIENCE;
         let mut out = Vec::new();
         while self.wants == 0 {
@@ -173,8 +219,13 @@ impl Encoder {
         if key {
             self.set(&CODECAPI_AVEncVideoForceKeyFrame, 1).context("forcing a keyframe")?;
         }
-        let sample = self.sample(yuv)?;
-        unsafe { self.mft.ProcessInput(self.ids.0, &sample, 0)? };
+        // One frame in Media Foundation's 100 ns units.
+        let frame = 10_000_000 / i64::from(self.fps);
+        unsafe {
+            sample.SetSampleTime(self.frames * frame)?;
+            sample.SetSampleDuration(frame)?;
+            self.mft.ProcessInput(self.ids.0, &sample, 0)?;
+        }
         self.wants -= 1;
         self.frames += 1;
         // Some encoders send the SPS and PPS as a sample of their own: wait for the picture.
@@ -265,12 +316,8 @@ impl Encoder {
             }
             buf.Unlock()?;
             buf.SetCurrentLength(len as u32)?;
-            // One frame in Media Foundation's 100 ns units.
-            let frame = 10_000_000 / i64::from(self.fps);
             let s = MFCreateSample()?;
             s.AddBuffer(&buf)?;
-            s.SetSampleTime(self.frames * frame)?;
-            s.SetSampleDuration(frame)?;
             Ok(s)
         }
     }
@@ -310,6 +357,157 @@ impl Drop for Encoder {
             let _ = self.mft.ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
             let _ = self.activate.ShutdownObject();
         }
+    }
+}
+
+/// The GPU half of an encoder that reads the capture's textures: the video processor scales each
+/// one and converts it to NV12 in a texture the encoder reads.
+struct Convert {
+    video: ID3D11VideoDevice,
+    ctx: ID3D11VideoContext,
+    /// Hands the device to the encoder; kept for as long as it encodes.
+    _manager: IMFDXGIDeviceManager,
+    nv12: ID3D11Texture2D,
+    /// Made for one picture size; another size makes it again.
+    processor: Option<Processor>,
+}
+
+struct Processor {
+    from: (u32, u32),
+    list: ID3D11VideoProcessorEnumerator,
+    vp: ID3D11VideoProcessor,
+    out: ID3D11VideoProcessorOutputView,
+}
+
+impl Convert {
+    /// Share `device` with the encoder, which must be able to read its textures, and make the
+    /// `w`x`h` NV12 texture it reads.
+    unsafe fn attach(mft: &IMFTransform, attrs: &IMFAttributes, device: &ID3D11Device, w: u32, h: u32) -> anyhow::Result<Self> {
+        unsafe {
+            anyhow::ensure!(attrs.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) == 1, "can't read textures (not D3D11-aware)");
+            let (mut token, mut manager) = (0, None);
+            MFCreateDXGIDeviceManager(&mut token, &mut manager)?;
+            let manager = manager.context("no DXGI device manager")?;
+            manager.ResetDevice(device, token)?;
+            mft.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)?;
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: w,
+                Height: h,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_NV12,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+            };
+            let mut nv12 = None;
+            device.CreateTexture2D(&desc, None, Some(&mut nv12))?;
+            Ok(Self {
+                video: device.cast()?,
+                ctx: device.GetImmediateContext()?.cast()?,
+                _manager: manager,
+                nv12: nv12.context("no NV12 texture")?,
+                processor: None,
+            })
+        }
+    }
+
+    /// `picture` (BGRA, any size) scaled into the NV12 texture.
+    fn convert(&mut self, picture: &ID3D11Texture2D, to: (u32, u32)) -> anyhow::Result<()> {
+        unsafe {
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            picture.GetDesc(&mut desc);
+            let from = (desc.Width, desc.Height);
+            if self.processor.as_ref().is_none_or(|p| p.from != from) {
+                self.processor = Some(Processor::new(&self.video, &self.ctx, &self.nv12, from, to)?);
+            }
+            let p = self.processor.as_ref().expect("just made");
+            let view = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                FourCC: 0,
+                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 } },
+            };
+            let mut input = None;
+            self.video.CreateVideoProcessorInputView(picture, &p.list, &view, Some(&mut input))?;
+            let mut streams =
+                [D3D11_VIDEO_PROCESSOR_STREAM { Enable: true.into(), pInputSurface: ManuallyDrop::new(input), ..Default::default() }];
+            let done = self.ctx.VideoProcessorBlt(&p.vp, &p.out, 0, &streams);
+            ManuallyDrop::drop(&mut streams[0].pInputSurface);
+            Ok(done?)
+        }
+    }
+
+    /// The NV12 texture as the encoder's next input.
+    fn sample(&self) -> anyhow::Result<IMFSample> {
+        unsafe {
+            let buf = MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &self.nv12, 0, false)?;
+            buf.SetCurrentLength(buf.cast::<IMF2DBuffer>()?.GetContiguousLength()?)?;
+            let s = MFCreateSample()?;
+            s.AddBuffer(&buf)?;
+            Ok(s)
+        }
+    }
+}
+
+impl Processor {
+    unsafe fn new(video: &ID3D11VideoDevice, ctx: &ID3D11VideoContext, nv12: &ID3D11Texture2D, from: (u32, u32), to: (u32, u32)) -> anyhow::Result<Self> {
+        unsafe {
+            let rate = DXGI_RATIONAL { Numerator: 60, Denominator: 1 };
+            let content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+                InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                InputFrameRate: rate,
+                InputWidth: from.0,
+                InputHeight: from.1,
+                OutputFrameRate: rate,
+                OutputWidth: to.0,
+                OutputHeight: to.1,
+                Usage: D3D11_VIDEO_USAGE_OPTIMAL_SPEED,
+            };
+            let list = video.CreateVideoProcessorEnumerator(&content)?;
+            let can = |f, what: D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT| list.CheckVideoProcessorFormat(f).is_ok_and(|s| s & what.0 as u32 != 0);
+            anyhow::ensure!(
+                can(DXGI_FORMAT_B8G8R8A8_UNORM, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT)
+                    && can(DXGI_FORMAT_NV12, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT),
+                "the video processor can't turn BGRA into NV12"
+            );
+            let vp = video.CreateVideoProcessor(&list, 0)?;
+            let view = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 { Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 } },
+            };
+            let mut out = None;
+            video.CreateVideoProcessorOutputView(nv12, &list, &view, Some(&mut out))?;
+            // Full-range RGB in, BT.601 limited-range YCbCr out: what OpenH264 encodes and every
+            // viewer decodes, so colors match whichever encoder made the picture.
+            match ctx.cast::<ID3D11VideoContext1>() {
+                Ok(ctx) => {
+                    ctx.VideoProcessorSetStreamColorSpace1(&vp, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+                    ctx.VideoProcessorSetOutputColorSpace1(&vp, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601);
+                }
+                // Before Windows 10: the bit fields (Nominal_Range 16-235 at bit 4; matrix bit 2
+                // off is BT.601).
+                Err(_) => {
+                    ctx.VideoProcessorSetStreamColorSpace(&vp, 0, &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 });
+                    ctx.VideoProcessorSetOutputColorSpace(&vp, &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 1 << 4 });
+                }
+            }
+            ctx.VideoProcessorSetStreamFrameFormat(&vp, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+            // Desktop text, not film: none of the driver's denoising or sharpening.
+            ctx.VideoProcessorSetStreamAutoProcessingMode(&vp, 0, false);
+            Ok(Self { from, list, vp, out: out.context("no output view")? })
+        }
+    }
+}
+
+/// Whether `a` runs on the GPU with this LUID. Encoders that don't say are tried; the device
+/// manager refuses one that can't use the device.
+fn on_adapter(a: &IMFActivate, luid: LUID) -> bool {
+    let mut blob = [0u8; 8];
+    match unsafe { a.GetBlob(&MFT_ENUM_ADAPTER_LUID, &mut blob, None) } {
+        Ok(()) => blob[..4] == luid.LowPart.to_le_bytes() && blob[4..] == luid.HighPart.to_le_bytes(),
+        Err(_) => true,
     }
 }
 

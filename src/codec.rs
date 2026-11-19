@@ -1,7 +1,9 @@
 //! H.264 both ways. The encoder sizes the picture from the quality preset, the link (`set_rate`)
-//! and how fast this computer encodes, and uses the GPU's encoder on Windows when there is one.
+//! and how fast this computer encodes, and uses the GPU's encoder on Windows when there is one;
+//! when it's on the GPU that captured the frame, the picture never leaves the GPU.
 //! Output is always Constrained Baseline in Annex B, which OpenH264's decoder (the viewer, on
 //! every OS) plays.
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use openh264::OpenH264API;
@@ -84,6 +86,9 @@ pub struct Encoder {
     /// The hardware encoder failed once: OpenH264 for the rest of the session.
     #[cfg_attr(not(windows), allow(dead_code))]
     no_hw: bool,
+    /// Reading pictures on the capturing GPU failed once: from memory for the rest of it.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    no_gpu: bool,
     pace: Pace,
     scaler: Option<Scaler>,
     scratch: Vec<u8>,
@@ -98,6 +103,8 @@ struct Stream {
     h: usize,
     bps: u32,
     fps: u32,
+    /// The capturing GPU it reads pictures on (`device_id`), 0 when they come from memory.
+    gpu: usize,
 }
 
 enum Backend {
@@ -105,6 +112,30 @@ enum Backend {
     /// With a decoder until its first output has been checked.
     #[cfg(windows)]
     Hard(mf::Encoder, Option<Decoder>),
+}
+
+/// A picture as an encoder takes it.
+enum Picture<'a> {
+    Yuv(&'a YUVBuffer),
+    /// The captured texture, on the GPU the encoder reads.
+    #[cfg(windows)]
+    Gpu(&'a windows::Win32::Graphics::Direct3D11::ID3D11Texture2D),
+}
+
+/// A GPU pictures are captured on (Windows only).
+#[cfg(windows)]
+type Device = windows::Win32::Graphics::Direct3D11::ID3D11Device;
+#[cfg(not(windows))]
+type Device = std::convert::Infallible;
+
+/// Tells GPUs apart: two frames with the same id are on the same device.
+#[cfg(windows)]
+fn device_id(d: &Device) -> usize {
+    windows::core::Interface::as_raw(d) as usize
+}
+#[cfg(not(windows))]
+fn device_id(d: &Device) -> usize {
+    match *d {}
 }
 
 /// Encode times over the current window of about a second.
@@ -133,6 +164,7 @@ impl Encoder {
             cpu_steps: 0,
             stream: None,
             no_hw: false,
+            no_gpu: false,
             pace: Pace { since: Instant::now(), frames: 0, busy: Duration::ZERO, calm: 0, up_after: 3 },
             scaler: None,
             scratch: Vec::new(),
@@ -184,9 +216,11 @@ impl Encoder {
         anyhow::ensure!(w >= 16 && h >= 16, "frame too small: {}x{}", f.w, f.h);
         let bps = self.bitrate(f);
         let fps = self.quality.fps();
+        let device = self.device(f);
+        let gpu = device.as_ref().map_or(0, device_id);
 
         let mut restart = match &mut self.stream {
-            Some(s) if (s.w, s.h, s.fps) == (w, h, fps) => {
+            Some(s) if (s.w, s.h, s.fps, s.gpu) == (w, h, fps, gpu) => {
                 let change = (bps as f64 / s.bps as f64 - 1.0).abs();
                 if change >= 0.05 && s.enc.set_bitrate(bps, s.bps) {
                     s.bps = bps;
@@ -198,19 +232,24 @@ impl Encoder {
         };
         if restart {
             self.stream = None;
-            self.stream = Some(self.open(w, h, bps, fps)?);
+            self.stream = Some(self.open(w, h, bps, fps, device.as_ref())?);
         }
-        let yuv = to_yuv(f, w, h, &mut self.scaler, &mut self.scratch, &mut self.yuv);
-        let mut out = self.stream.as_mut().expect("opened above").enc.encode(yuv, key);
-        if let Err(e) = &out
+        let mut out = self.encode_with(f, w, h, key);
+        // A hardware encoder that fails steps down for the rest of the session: from the GPU to
+        // memory, then to OpenH264.
+        while let Err(e) = &out
             && self.hardware()
         {
-            eprintln!("deskline: the hardware encoder failed, using OpenH264 from now on: {e:#}");
-            self.no_hw = true;
+            if self.on_gpu() {
+                eprintln!("deskline: encoding on the GPU failed, encoding from memory: {e:#}");
+                self.no_gpu = true;
+            } else {
+                eprintln!("deskline: the hardware encoder failed, using OpenH264 from now on: {e:#}");
+                self.no_hw = true;
+            }
             self.stream = None;
-            self.stream = Some(self.open(w, h, bps, fps)?);
-            let yuv = self.yuv.as_ref().expect("filled above");
-            out = self.stream.as_mut().expect("just opened").enc.encode(yuv, true);
+            self.stream = Some(self.open(w, h, bps, fps, None)?);
+            out = self.encode_with(f, w, h, true);
             restart = true;
         }
         // Opening an encoder (and checking a hardware one) isn't what a frame costs.
@@ -218,6 +257,39 @@ impl Encoder {
             self.pace(f, started.elapsed());
         }
         out
+    }
+
+    /// `f` at `w`x`h` through the open stream: its texture when the encoder reads the capturing
+    /// GPU, else its pixels from memory (read back from the GPU if they're only there).
+    fn encode_with(&mut self, f: &Frame, w: usize, h: usize, key: bool) -> anyhow::Result<Vec<u8>> {
+        let stream = self.stream.as_mut().expect("opened before");
+        #[cfg(windows)]
+        if let Some(g) = &f.gpu
+            && stream.gpu != 0
+        {
+            return stream.enc.encode(Picture::Gpu(&g.tex), key);
+        }
+        let px = pixels(f)?;
+        let yuv = to_yuv(f, &px, w, h, &mut self.scaler, &mut self.scratch, &mut self.yuv);
+        stream.enc.encode(Picture::Yuv(yuv), key)
+    }
+
+    /// The GPU `f` was captured on, when an encoder may read it there.
+    fn device(&self, f: &Frame) -> Option<Device> {
+        #[cfg(windows)]
+        if !self.no_hw
+            && !self.no_gpu
+            && let Some(g) = &f.gpu
+        {
+            return g.device().ok();
+        }
+        let _ = f;
+        None
+    }
+
+    /// Whether the encoder reads pictures on the capturing GPU.
+    fn on_gpu(&self) -> bool {
+        self.stream.as_ref().is_some_and(|s| s.gpu != 0)
     }
 
     fn steps(&self) -> u32 {
@@ -231,17 +303,32 @@ impl Encoder {
         ((w * h) as f64 * self.quality.preset().1 * self.rate as f64).max(10_000.0) as u32
     }
 
-    fn open(&mut self, w: usize, h: usize, bps: u32, fps: u32) -> anyhow::Result<Stream> {
+    /// The best encoder there is: the GPU's reading `gpu`'s textures, the GPU's reading memory,
+    /// then OpenH264.
+    fn open(&mut self, w: usize, h: usize, bps: u32, fps: u32, gpu: Option<&Device>) -> anyhow::Result<Stream> {
         #[cfg(windows)]
         if !self.no_hw {
-            match mf::Encoder::new(w, h, bps, fps) {
-                Ok(enc) => return Ok(Stream { enc: Backend::Hard(enc, Some(Decoder::new()?)), w, h, bps, fps }),
+            let hard = |enc, gpu| -> anyhow::Result<Stream> {
+                Ok(Stream { enc: Backend::Hard(enc, Some(Decoder::new()?)), w, h, bps, fps, gpu })
+            };
+            if let Some(device) = gpu {
+                match mf::Encoder::new(w, h, bps, fps, Some(device)) {
+                    Ok(enc) => return hard(enc, device_id(device)),
+                    Err(e) => {
+                        self.no_gpu = true;
+                        eprintln!("deskline: no encoder reads the capturing GPU, encoding from memory: {e:#}");
+                    }
+                }
+            }
+            match mf::Encoder::new(w, h, bps, fps, None) {
+                Ok(enc) => return hard(enc, 0),
                 Err(e) => {
                     self.no_hw = true;
                     eprintln!("deskline: no hardware encoder, using OpenH264: {e:#}");
                 }
             }
         }
+        let _ = gpu;
         let config = EncoderConfig::new()
             .usage_type(UsageType::CameraVideoRealTime)
             .rate_control_mode(RateControlMode::Bitrate)
@@ -252,7 +339,7 @@ impl Encoder {
             .num_threads(4)
             .skip_frames(false);
         let enc = H264Encoder::with_api_config(OpenH264API::from_source(), config)?;
-        Ok(Stream { enc: Backend::Soft(enc), w, h, bps, fps })
+        Ok(Stream { enc: Backend::Soft(enc), w, h, bps, fps, gpu: 0 })
     }
 
     /// Step the size down when this computer can't keep the frame rate at it, and back up after
@@ -286,9 +373,14 @@ impl Encoder {
 }
 
 impl Backend {
-    fn encode(&mut self, yuv: &YUVBuffer, key: bool) -> anyhow::Result<Vec<u8>> {
+    fn encode(&mut self, p: Picture, key: bool) -> anyhow::Result<Vec<u8>> {
         match self {
             Backend::Soft(enc) => {
+                let yuv = match p {
+                    Picture::Yuv(yuv) => yuv,
+                    #[cfg(windows)]
+                    Picture::Gpu(_) => anyhow::bail!("OpenH264 takes pictures from memory"),
+                };
                 if key {
                     enc.force_intra_frame();
                 }
@@ -296,7 +388,10 @@ impl Backend {
             }
             #[cfg(windows)]
             Backend::Hard(enc, check) => {
-                let out = enc.encode(yuv, key)?;
+                let out = match p {
+                    Picture::Yuv(yuv) => enc.encode(yuv, key)?,
+                    Picture::Gpu(tex) => enc.encode_gpu(tex, key)?,
+                };
                 // Trust it once OpenH264 has played its first picture at the right size.
                 if let Some(dec) = check {
                     let pic = dec.decode(&out)?;
@@ -365,6 +460,7 @@ fn level_fps(w: usize, h: usize, fps: u32) -> u32 {
 /// when they're the right size.
 fn to_yuv<'a>(
     f: &Frame,
+    px: &[u8],
     w: usize,
     h: usize,
     scaler: &mut Option<Scaler>,
@@ -372,15 +468,15 @@ fn to_yuv<'a>(
     yuv: &'a mut Option<YUVBuffer>,
 ) -> &'a YUVBuffer {
     let px: &[u8] = if (w, h) == (f.w, f.h) {
-        &f.px
+        px
     } else if (w, h) == (f.w & !1, f.h & !1) {
-        crop(f, w, h, scratch);
+        crop(px, f.w, w, h, scratch);
         scratch.as_slice()
     } else {
         if !matches!(scaler, Some(s) if s.from == (f.w, f.h) && s.to == (w, h)) {
             *scaler = Some(Scaler::new((f.w, f.h), (w, h)));
         }
-        scaler.as_mut().expect("just set").run(&f.px, scratch);
+        scaler.as_mut().expect("just set").run(px, scratch);
         scratch.as_slice()
     };
     if yuv.as_ref().is_none_or(|y| y.dimensions() != (w, h)) {
@@ -395,11 +491,23 @@ fn to_yuv<'a>(
     out
 }
 
-fn crop(f: &Frame, w: usize, h: usize, out: &mut Vec<u8>) {
+/// The top left `w`x`h` of a picture `stride` pixels wide.
+fn crop(px: &[u8], stride: usize, w: usize, h: usize, out: &mut Vec<u8>) {
     out.clear();
     for y in 0..h {
-        out.extend_from_slice(&f.px[y * f.w * 4..][..w * 4]);
+        out.extend_from_slice(&px[y * stride * 4..][..w * 4]);
     }
+}
+
+/// `f`'s pixels in memory, read back from the GPU when they're only there.
+fn pixels(f: &Frame) -> anyhow::Result<Cow<'_, [u8]>> {
+    #[cfg(windows)]
+    if f.px.is_empty()
+        && let Some(g) = &f.gpu
+    {
+        return Ok(Cow::Owned(g.read()?));
+    }
+    Ok(Cow::Borrowed(&f.px))
 }
 
 /// Area averaging down by any ratio: each output pixel is the mean of the source pixels it
@@ -518,7 +626,7 @@ mod tests {
                 let _ = y;
             }
         }
-        Frame { w, h, bgra: true, px }
+        Frame { w, h, bgra: true, px, gpu: None }
     }
 
     /// `frame` with its top quarter redrawn every frame with sharp edges and blocks that don't
@@ -660,7 +768,7 @@ mod tests {
         // 3 -> 2: the middle pixel is split half and half.
         assert_eq!(spans(3, 2), vec![(0, vec![171, 85]), (1, vec![85, 171])]);
         assert_eq!(spans(4, 2), vec![(0, vec![128, 128]), (2, vec![128, 128])]);
-        let f = Frame { w: 5, h: 3, bgra: true, px: [10, 20, 30, 255].repeat(15) };
+        let f = Frame { w: 5, h: 3, bgra: true, px: [10, 20, 30, 255].repeat(15), gpu: None };
         let mut out = Vec::new();
         Scaler::new((5, 3), (2, 2)).run(&f.px, &mut out);
         assert_eq!(out, [10, 20, 30, 255].repeat(4));

@@ -19,13 +19,26 @@ pub(crate) mod imp;
 #[path = "linux.rs"]
 mod linux;
 
+#[cfg(windows)]
+#[path = "gpu.rs"]
+mod gpu;
+#[cfg(windows)]
+pub use gpu::Gpu;
+
+/// Pictures stay on the GPU only on Windows.
+#[cfg(not(windows))]
+pub enum Gpu {}
+
 /// One captured frame, 4 bytes per pixel, rows packed with no padding.
 pub struct Frame {
     pub w: usize,
     pub h: usize,
     /// Byte order BGRA (or BGRx) when true, RGBA (or RGBx) when false.
     pub bgra: bool,
+    /// Empty when the picture is only on the GPU (`gpu`).
     pub px: Vec<u8>,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub gpu: Option<Gpu>,
 }
 
 /// One screen the host can share.
@@ -219,10 +232,16 @@ pub struct Pool(Vec<Arc<Frame>>);
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 impl Pool {
-    /// An empty buffer with room for `len` bytes, from a frame nobody holds any more if there is one.
+    /// A frame nobody holds any more, to fill again: its buffer, or its GPU texture.
+    pub fn reuse(&mut self) -> Option<Frame> {
+        let free = self.0.iter().position(|f| Arc::strong_count(f) == 1)?;
+        Arc::into_inner(self.0.swap_remove(free))
+    }
+
+    /// An empty buffer with room for `len` bytes, reused if there is one.
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn take(&mut self, len: usize) -> Vec<u8> {
-        let free = self.0.iter().position(|f| Arc::strong_count(f) == 1);
-        let mut px = free.and_then(|i| Arc::into_inner(self.0.swap_remove(i))).map_or_else(Vec::new, |f| f.px);
+        let mut px = self.reuse().map_or_else(Vec::new, |f| f.px);
         px.clear();
         px.reserve(len);
         px
@@ -253,7 +272,7 @@ impl Pool {
 pub const DEFAULT_FPS: u32 = 30;
 
 /// The pause between captures at `fps` (0: `DEFAULT_FPS`).
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+#[cfg_attr(any(target_os = "macos", test), allow(dead_code))]
 pub fn gap(fps: u32) -> Duration {
     Duration::from_secs(1) / if fps == 0 { DEFAULT_FPS } else { fps }
 }
@@ -385,7 +404,7 @@ mod tests {
     fn pool_hands_back_only_buffers_nobody_holds() {
         let (tx, rx) = watch::channel(None);
         let mut pool = Pool::default();
-        let frame = |px: Vec<u8>| Frame { w: 2, h: 2, bgra: true, px };
+        let frame = |px: Vec<u8>| Frame { w: 2, h: 2, bgra: true, px, gpu: None };
         let mut px = pool.take(16);
         px.extend_from_slice(&[1; 16]);
         let first = px.as_ptr();
