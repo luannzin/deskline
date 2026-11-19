@@ -4,6 +4,7 @@
 //! Output is always Constrained Baseline in Annex B, which OpenH264's decoder (the viewer, on
 //! every OS) plays.
 use std::borrow::Cow;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openh264::OpenH264API;
@@ -17,6 +18,13 @@ use crate::desktop::{DEFAULT_FPS, Frame};
 
 #[cfg(windows)]
 mod mf;
+#[cfg(target_os = "linux")]
+mod gst;
+/// The GPU's encoder: Media Foundation on Windows, GStreamer on Linux.
+#[cfg(target_os = "linux")]
+use gst as hw;
+#[cfg(windows)]
+use mf as hw;
 
 /// OpenH264's largest picture (level 5.2) either way round; the viewer's decoder stops there too.
 const MAX_LONG: u64 = 3840;
@@ -84,7 +92,7 @@ pub struct Encoder {
     cpu_steps: u32,
     stream: Option<Stream>,
     /// The hardware encoder failed once: OpenH264 for the rest of the session.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     no_hw: bool,
     /// Reading pictures on the capturing GPU failed once: from memory for the rest of it.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -110,8 +118,8 @@ struct Stream {
 enum Backend {
     Soft(H264Encoder),
     /// With a decoder until its first output has been checked.
-    #[cfg(windows)]
-    Hard(mf::Encoder, Option<Decoder>),
+    #[cfg(any(windows, target_os = "linux"))]
+    Hard(hw::Encoder, Option<Decoder>),
 }
 
 /// A picture as an encoder takes it.
@@ -120,6 +128,9 @@ enum Picture<'a> {
     /// The captured texture, on the GPU the encoder reads.
     #[cfg(windows)]
     Gpu(&'a windows::Win32::Graphics::Direct3D11::ID3D11Texture2D),
+    /// The frame as captured: the GPU scales and converts it.
+    #[cfg(target_os = "linux")]
+    Frame(&'a Arc<Frame>),
 }
 
 /// A GPU pictures are captured on (Windows only).
@@ -201,7 +212,7 @@ impl Encoder {
 
     /// Whether a hardware encoder is in use.
     pub fn hardware(&self) -> bool {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         if let Some(Stream { enc: Backend::Hard(..), .. }) = self.stream {
             return true;
         }
@@ -210,7 +221,7 @@ impl Encoder {
 
     /// Encode one frame; `key` forces a keyframe. A new size starts a new stream (keyframe
     /// with fresh SPS), which the decoder follows on its own.
-    pub fn encode(&mut self, f: &Frame, key: bool) -> anyhow::Result<Vec<u8>> {
+    pub fn encode(&mut self, f: &Arc<Frame>, key: bool) -> anyhow::Result<Vec<u8>> {
         let started = Instant::now();
         let (w, h) = fit(f.w, f.h, self.quality, self.steps());
         anyhow::ensure!(w >= 16 && h >= 16, "frame too small: {}x{}", f.w, f.h);
@@ -240,7 +251,7 @@ impl Encoder {
         while let Err(e) = &out
             && self.hardware()
         {
-            if self.on_gpu() {
+            if self.stream.as_ref().is_some_and(|s| s.gpu != 0) {
                 eprintln!("deskline: encoding on the GPU failed, encoding from memory: {e:#}");
                 self.no_gpu = true;
             } else {
@@ -260,14 +271,19 @@ impl Encoder {
     }
 
     /// `f` at `w`x`h` through the open stream: its texture when the encoder reads the capturing
-    /// GPU, else its pixels from memory (read back from the GPU if they're only there).
-    fn encode_with(&mut self, f: &Frame, w: usize, h: usize, key: bool) -> anyhow::Result<Vec<u8>> {
+    /// GPU, the frame as captured for a GPU encoder that scales it itself, else I420 pixels from
+    /// memory (read back from the GPU if they're only there).
+    fn encode_with(&mut self, f: &Arc<Frame>, w: usize, h: usize, key: bool) -> anyhow::Result<Vec<u8>> {
         let stream = self.stream.as_mut().expect("opened before");
         #[cfg(windows)]
         if let Some(g) = &f.gpu
             && stream.gpu != 0
         {
             return stream.enc.encode(Picture::Gpu(&g.tex), key);
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(stream.enc, Backend::Hard(..)) {
+            return stream.enc.encode(Picture::Frame(f), key);
         }
         let px = pixels(f)?;
         let yuv = to_yuv(f, &px, w, h, &mut self.scaler, &mut self.scratch, &mut self.yuv);
@@ -287,11 +303,6 @@ impl Encoder {
         None
     }
 
-    /// Whether the encoder reads pictures on the capturing GPU.
-    fn on_gpu(&self) -> bool {
-        self.stream.as_ref().is_some_and(|s| s.gpu != 0)
-    }
-
     fn steps(&self) -> u32 {
         self.cpu_steps + self.net_step as u32
     }
@@ -306,13 +317,14 @@ impl Encoder {
     /// The best encoder there is: the GPU's reading `gpu`'s textures, the GPU's reading memory,
     /// then OpenH264.
     fn open(&mut self, w: usize, h: usize, bps: u32, fps: u32, gpu: Option<&Device>) -> anyhow::Result<Stream> {
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         if !self.no_hw {
             let hard = |enc, gpu| -> anyhow::Result<Stream> {
                 Ok(Stream { enc: Backend::Hard(enc, Some(Decoder::new()?)), w, h, bps, fps, gpu })
             };
+            #[cfg(windows)]
             if let Some(device) = gpu {
-                match mf::Encoder::new(w, h, bps, fps, Some(device)) {
+                match hw::Encoder::new(w, h, bps, fps, Some(device)) {
                     Ok(enc) => return hard(enc, device_id(device)),
                     Err(e) => {
                         self.no_gpu = true;
@@ -320,7 +332,11 @@ impl Encoder {
                     }
                 }
             }
-            match mf::Encoder::new(w, h, bps, fps, None) {
+            #[cfg(windows)]
+            let made = hw::Encoder::new(w, h, bps, fps, None);
+            #[cfg(target_os = "linux")]
+            let made = hw::Encoder::new(w, h, bps, fps);
+            match made {
                 Ok(enc) => return hard(enc, 0),
                 Err(e) => {
                     self.no_hw = true;
@@ -336,7 +352,10 @@ impl Encoder {
             .max_frame_rate(FrameRate::from_hz(level_fps(w, h, fps) as f32))
             .complexity(Complexity::Low)
             .max_slice_len(16_000)
-            .num_threads(4)
+            // OpenH264's encoder threads share one pool per process, and a pool thread can still
+            // be unlocking an encoder's task manager after that encoder is freed: a crash when
+            // encoders restart (new size, new session). One thread costs ~1-3 ms a 1080p frame.
+            .num_threads(1)
             .skip_frames(false);
         let enc = H264Encoder::with_api_config(OpenH264API::from_source(), config)?;
         Ok(Stream { enc: Backend::Soft(enc), w, h, bps, fps, gpu: 0 })
@@ -378,19 +397,25 @@ impl Backend {
             Backend::Soft(enc) => {
                 let yuv = match p {
                     Picture::Yuv(yuv) => yuv,
-                    #[cfg(windows)]
-                    Picture::Gpu(_) => anyhow::bail!("OpenH264 takes pictures from memory"),
+                    #[cfg(any(windows, target_os = "linux"))]
+                    _ => anyhow::bail!("OpenH264 takes I420 pictures"),
                 };
                 if key {
                     enc.force_intra_frame();
                 }
                 Ok(enc.encode(yuv)?.to_vec())
             }
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             Backend::Hard(enc, check) => {
                 let out = match p {
+                    #[cfg(windows)]
                     Picture::Yuv(yuv) => enc.encode(yuv, key)?,
+                    #[cfg(windows)]
                     Picture::Gpu(tex) => enc.encode_gpu(tex, key)?,
+                    #[cfg(target_os = "linux")]
+                    Picture::Frame(f) => enc.encode(f, key)?,
+                    #[cfg(target_os = "linux")]
+                    Picture::Yuv(_) => anyhow::bail!("the GPU takes the frame as captured"),
                 };
                 // Trust it once OpenH264 has played its first picture at the right size.
                 if let Some(dec) = check {
@@ -421,7 +446,7 @@ impl Backend {
                     set(ENCODER_OPTION_BITRATE, SPATIAL_LAYER_ALL) && set(ENCODER_OPTION_MAX_BITRATE, SPATIAL_LAYER_0)
                 }
             }
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             Backend::Hard(enc, _) => enc.set_bitrate(bps),
         }
     }
@@ -579,6 +604,46 @@ fn spans(from: usize, to: usize) -> Vec<(usize, Vec<u16>)> {
         .collect()
 }
 
+/// A hardware encoder's SPS and PPS: the profile checked on the first, both put back in front of
+/// any keyframe that comes without them, so a viewer can always start from a keyframe.
+#[derive(Default)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+struct Headers(Vec<u8>);
+
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+impl Headers {
+    fn fix(&mut self, out: &mut Vec<u8>) -> anyhow::Result<()> {
+        let (mut sps, mut idr) = (false, false);
+        let mut found = Vec::new();
+        for n in openh264::nal_units(out) {
+            match nal_kind(n) {
+                Some(7) => {
+                    sps = true;
+                    let profile = n.iter().skip_while(|&&b| b != 1).nth(2).copied();
+                    anyhow::ensure!(profile == Some(66), "it makes profile {profile:?}, not Constrained Baseline (66)");
+                    found.extend_from_slice(n);
+                }
+                Some(8) => found.extend_from_slice(n),
+                Some(5) => idr = true,
+                _ => {}
+            }
+        }
+        if sps {
+            self.0 = found;
+        } else if idr {
+            anyhow::ensure!(!self.0.is_empty(), "keyframe without SPS");
+            out.splice(0..0, self.0.iter().copied());
+        }
+        Ok(())
+    }
+}
+
+/// NAL unit type of one Annex B unit (start code included).
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn nal_kind(nal: &[u8]) -> Option<u8> {
+    nal.iter().skip_while(|&&b| b != 1).nth(1).map(|b| b & 0x1f)
+}
+
 pub struct Decoder {
     h264: H264Decoder,
 }
@@ -615,7 +680,11 @@ impl Decoder {
 mod tests {
     use super::*;
 
-    fn frame(w: usize, h: usize, t: usize) -> Frame {
+    fn frame(w: usize, h: usize, t: usize) -> Arc<Frame> {
+        Arc::new(plain(w, h, t))
+    }
+
+    fn plain(w: usize, h: usize, t: usize) -> Frame {
         let mut px = Vec::with_capacity(w * h * 4);
         for y in 0..h {
             for x in 0..w {
@@ -631,14 +700,14 @@ mod tests {
 
     /// `frame` with its top quarter redrawn every frame with sharp edges and blocks that don't
     /// just move: what a rate change has to squeeze.
-    fn busy(w: usize, h: usize, t: usize) -> Frame {
-        let mut f = frame(w, h, t);
+    fn busy(w: usize, h: usize, t: usize) -> Arc<Frame> {
+        let mut f = plain(w, h, t);
         for (i, p) in f.px[..w * (h / 16) * 4].chunks_exact_mut(4).enumerate() {
             let (x, y) = (i % w, i / w);
             let v = ((x * (t % 7 + 3) + y * (t % 5 + 2)) / 4) as u8;
             p[..3].copy_from_slice(&[v, v.wrapping_mul(3), v ^ (x >> 3) as u8]);
         }
-        f
+        Arc::new(f)
     }
 
     /// OpenH264 only, whatever this computer has, at a size that stays put: a debug build

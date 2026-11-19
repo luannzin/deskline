@@ -10,15 +10,10 @@ use windows::Win32::Graphics::Direct3D11::*;
 pub struct Gpu {
     pub tex: ID3D11Texture2D,
     /// The capture's CPU-readable texture of the same size, shared by its frames.
-    staging: Arc<Mutex<ID3D11Texture2D>>,
+    pub staging: Arc<Mutex<ID3D11Texture2D>>,
 }
 
 impl Gpu {
-    #[cfg_attr(test, allow(dead_code))]
-    pub fn new(tex: ID3D11Texture2D, staging: Arc<Mutex<ID3D11Texture2D>>) -> Self {
-        Self { tex, staging }
-    }
-
     pub fn device(&self) -> windows::core::Result<ID3D11Device> {
         unsafe { self.tex.GetDevice() }
     }

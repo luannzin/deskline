@@ -39,7 +39,7 @@ Version: $version
 Architecture: amd64
 Maintainer: luannzin <luandaniel966@gmail.com>
 Depends: $linked, libegl1, libgl1, libx11-6, libx11-xcb1, libxcb1, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libwayland-cursor0, libwayland-egl1
-Recommends: pipewire, xdg-desktop-portal
+Recommends: pipewire, xdg-desktop-portal, gstreamer1.0-plugins-bad, gstreamer1.0-vaapi
 Section: net
 Priority: optional
 Homepage: https://github.com/luannzin/deskline

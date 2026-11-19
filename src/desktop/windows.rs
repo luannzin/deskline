@@ -458,7 +458,7 @@ impl Dup {
             };
             self.ctx.CopyResource(&out, &self.desk);
             self.overlay(&out)?;
-            let gpu = Some(Gpu::new(out, self.staging.clone()));
+            let gpu = Some(Gpu { tex: out, staging: self.staging.clone() });
             Ok(Some(Frame { w: self.w, h: self.h, bgra: true, px: Vec::new(), gpu }))
         }
     }

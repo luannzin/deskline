@@ -31,7 +31,7 @@ Grab the file for your system from [Releases](https://github.com/luannzin/deskli
 |---|---|---|
 | Windows 10/11 | `deskline.exe` | One file. Run it as is, or click **Install Deskline on this computer** to install it for everyone with its service (see below). |
 | Ubuntu 24.04+ / Debian 12+ | `deskline_amd64.deb` | `sudo apt install ./deskline_amd64.deb` |
-| Linux, portable | `deskline-linux-x86_64` | No install: `chmod +x deskline-linux-x86_64` and run it. Needs PipeWire and a desktop session. |
+| Linux, portable | `deskline-linux-x86_64` | No install: `chmod +x deskline-linux-x86_64` and run it. Needs PipeWire, GStreamer and a desktop session. |
 | macOS 11+ | `Deskline.dmg` | Drag Deskline into Applications. Allow it under **System Settings → Privacy & Security → Screen Recording** and **Accessibility** when it asks. |
 | macOS, portable | `Deskline-macos.zip` | No install: unzip and open `Deskline.app` from anywhere. Same permissions as above. |
 
@@ -187,9 +187,11 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
 - `src/host.rs`, `src/viewer.rs`: both ends of a session. Frames are acked and as many may be in
   flight as fill one round trip; when acks hold the sender back, the encoder is asked for fewer
   bits, and for more once the link is calm.
-- `src/codec.rs`: H.264 with OpenH264 compiled in (or the GPU's encoder on Windows), sized and
-  paced by the quality setting: 30 fps for desktops, 120 for games. A picture that goes still is
-  encoded again a few times so text blurred by motion sharpens.
+- `src/codec.rs`: H.264 with OpenH264 compiled in, or the GPU's encoder when there is one, sized
+  and paced by the quality setting: 30 fps for desktops, 120 for games. On Windows (Media
+  Foundation) the picture goes from capture to encoder without leaving the GPU; on Linux
+  (GStreamer: NVENC, or VA-API on Intel and AMD) the GPU scales and converts it. A picture that
+  goes still is encoded again a few times so text blurred by motion sharpens.
 - `src/audio.rs`: what the speakers play, as Opus.
 - `src/files.rs`, `src/clip.rs`: file transfer and clipboard.
 - `src/desktop/`: capture and input. Windows: DXGI duplication and `SendInput`, following the
@@ -202,9 +204,10 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
 ## Known limits
 
 - Linux can't share the sign-in screen, and privacy mode is Windows-only.
-- 4K at 120 fps needs a GPU encoder on the shared computer (Windows) and a fast CPU on the viewing
-  one: Linux and macOS encode in software, and every viewer decodes in software, so Gaming settles
-  at a smaller size there.
+- 4K at 120 fps needs a GPU encoder on the shared computer and a fast CPU on the viewing one:
+  macOS encodes in software, Linux needs GStreamer's GPU encoders (`gstreamer1.0-plugins-bad` or
+  `gstreamer1.0-vaapi`), and every viewer decodes in software, so Gaming settles at a smaller size
+  without them.
 - Sharing sound from a Mac needs macOS 14.6+ or a loopback device such as BlackHole.
 - On a Mac the permissions are tied to the app's signature: an unsigned build asks again after
   each update.

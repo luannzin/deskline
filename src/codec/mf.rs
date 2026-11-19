@@ -21,6 +21,8 @@ use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMe
 use windows::Win32::System::Variant::VARIANT;
 use windows::core::{GUID, HRESULT, Interface, PWSTR};
 
+use super::{Headers, nal_kind};
+
 /// A hardware encoder answers in a few ms; this long means it's stuck or holding frames back.
 const PATIENCE: Duration = Duration::from_millis(500);
 
@@ -38,8 +40,7 @@ pub struct Encoder {
     frames: i64,
     /// Inputs the encoder asked for and hasn't been given yet.
     wants: u32,
-    /// The stream's SPS and PPS, put back in front of keyframes that come without them.
-    headers: Vec<u8>,
+    headers: Headers,
     pub name: String,
     /// Pictures come as textures on this GPU (`encode_gpu`) rather than from memory.
     gpu: Option<Convert>,
@@ -117,7 +118,7 @@ impl Encoder {
             fps,
             frames: 0,
             wants: 0,
-            headers: Vec::new(),
+            headers: Headers::default(),
             name,
             gpu: None,
         };
@@ -229,10 +230,10 @@ impl Encoder {
         self.wants -= 1;
         self.frames += 1;
         // Some encoders send the SPS and PPS as a sample of their own: wait for the picture.
-        while !nal_units(&out).any(|n| matches!(kind(n), Some(1 | 5))) {
+        while !nal_units(&out).any(|n| matches!(nal_kind(n), Some(1 | 5))) {
             self.event(deadline, &mut out)?;
         }
-        self.headers(&mut out)?;
+        self.headers.fix(&mut out)?;
         Ok(out)
     }
 
@@ -320,33 +321,6 @@ impl Encoder {
             s.AddBuffer(&buf)?;
             Ok(s)
         }
-    }
-
-    /// Check the profile on the first SPS, keep SPS and PPS, and put them in front of any
-    /// keyframe that lacks them so a viewer can always start from a keyframe.
-    fn headers(&mut self, out: &mut Vec<u8>) -> anyhow::Result<()> {
-        let (mut sps, mut idr) = (false, false);
-        let mut found = Vec::new();
-        for n in nal_units(out) {
-            match kind(n) {
-                Some(7) => {
-                    sps = true;
-                    let profile = n.iter().skip_while(|&&b| b != 1).nth(2).copied();
-                    anyhow::ensure!(profile == Some(66), "it makes profile {profile:?}, not Constrained Baseline (66)");
-                    found.extend_from_slice(n);
-                }
-                Some(8) => found.extend_from_slice(n),
-                Some(5) => idr = true,
-                _ => {}
-            }
-        }
-        if sps {
-            self.headers = found;
-        } else if idr {
-            anyhow::ensure!(!self.headers.is_empty(), "keyframe without SPS");
-            out.splice(0..0, self.headers.iter().copied());
-        }
-        Ok(())
     }
 }
 
@@ -481,18 +455,9 @@ impl Processor {
             video.CreateVideoProcessorOutputView(nv12, &list, &view, Some(&mut out))?;
             // Full-range RGB in, BT.601 limited-range YCbCr out: what OpenH264 encodes and every
             // viewer decodes, so colors match whichever encoder made the picture.
-            match ctx.cast::<ID3D11VideoContext1>() {
-                Ok(ctx) => {
-                    ctx.VideoProcessorSetStreamColorSpace1(&vp, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
-                    ctx.VideoProcessorSetOutputColorSpace1(&vp, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601);
-                }
-                // Before Windows 10: the bit fields (Nominal_Range 16-235 at bit 4; matrix bit 2
-                // off is BT.601).
-                Err(_) => {
-                    ctx.VideoProcessorSetStreamColorSpace(&vp, 0, &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 0 });
-                    ctx.VideoProcessorSetOutputColorSpace(&vp, &D3D11_VIDEO_PROCESSOR_COLOR_SPACE { _bitfield: 1 << 4 });
-                }
-            }
+            let ctx1 = ctx.cast::<ID3D11VideoContext1>()?;
+            ctx1.VideoProcessorSetStreamColorSpace1(&vp, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+            ctx1.VideoProcessorSetOutputColorSpace1(&vp, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601);
             ctx.VideoProcessorSetStreamFrameFormat(&vp, 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
             // Desktop text, not film: none of the driver's denoising or sharpening.
             ctx.VideoProcessorSetStreamAutoProcessingMode(&vp, 0, false);
@@ -509,11 +474,6 @@ fn on_adapter(a: &IMFActivate, luid: LUID) -> bool {
         Ok(()) => blob[..4] == luid.LowPart.to_le_bytes() && blob[4..] == luid.HighPart.to_le_bytes(),
         Err(_) => true,
     }
-}
-
-/// NAL unit type of one Annex B unit (start code included).
-fn kind(nal: &[u8]) -> Option<u8> {
-    nal.iter().skip_while(|&&b| b != 1).nth(1).map(|b| b & 0x1f)
 }
 
 fn name(a: &IMFActivate) -> String {
