@@ -56,30 +56,31 @@ pub enum Quality {
     Sharp,
     /// Smaller picture, fewer bits: for slow links.
     Smooth,
-    /// Up to 4K at up to 120 fps, many bits: games and video. Keeps the frame rate and gives
-    /// up size first. New in 0.5: added last, so older versions skip it.
+    /// Native: their screen as it is, its own size (up to 4K) at its own frame rate (as fast as
+    /// it refreshes, up to `NATIVE_FPS`), each frame with more bits than Sharp. It never gets
+    /// smaller: a slow computer or link sends fewer frames instead. For games and video. New in
+    /// 0.5 (as 120 fps Gaming): added last, so older versions skip it.
     Gaming,
 }
 
+/// Native captures as fast as the screen refreshes, up to this; a 60 Hz screen gives 60.
+const NATIVE_FPS: u32 = 240;
+
 impl Quality {
-    /// The longest side before any step down, and the top bitrate in bits per pixel per second.
+    /// The longest side before any step down, and the top bitrate in bits per pixel per second
+    /// at `DEFAULT_FPS`. Faster rates get the same bits per frame.
     fn preset(self) -> (u64, f64) {
         match self {
             Quality::Balanced => (1920, 2.0),
             Quality::Sharp => (MAX_LONG, 3.0),
             Quality::Smooth => (1280, 1.0),
-            Quality::Gaming => (MAX_LONG, 6.0),
+            Quality::Gaming => (MAX_LONG, 4.0),
         }
     }
 
     /// The most frames a second it sends.
     pub fn fps(self) -> u32 {
-        if self == Quality::Gaming { 120 } else { DEFAULT_FPS }
-    }
-
-    /// No step goes below this long side. A game at 480p isn't playable at any frame rate.
-    fn min_long(self) -> u64 {
-        if self == Quality::Gaming { 1280 } else { MIN_LONG }
+        if self == Quality::Gaming { NATIVE_FPS } else { DEFAULT_FPS }
     }
 }
 
@@ -226,7 +227,7 @@ impl Encoder {
         let (w, h) = fit(f.w, f.h, self.quality, self.steps());
         anyhow::ensure!(w >= 16 && h >= 16, "frame too small: {}x{}", f.w, f.h);
         let bps = self.bitrate(f);
-        let fps = self.quality.fps();
+        let fps = level_fps(w, h, self.quality.fps());
         let device = self.device(f);
         let gpu = device.as_ref().map_or(0, device_id);
 
@@ -303,15 +304,19 @@ impl Encoder {
         None
     }
 
+    /// Steps down from the preset's size. Native takes none.
     fn steps(&self) -> u32 {
-        self.cpu_steps + self.net_step as u32
+        if self.quality == Quality::Gaming { 0 } else { self.cpu_steps + self.net_step as u32 }
     }
 
     /// The preset's top bitrate for this screen times `rate`. The top is for the preset's size
-    /// before any step down, so `rate` keeps meaning the same while the size moves.
+    /// before any step down, so `rate` keeps meaning the same while the size moves. Encoders
+    /// spread it over the frame rate they're set up for, so a frame gets the same bits at any
+    /// rate; a screen that refreshes slower than that sends fewer frames and fewer bits.
     fn bitrate(&self, f: &Frame) -> u32 {
         let (w, h) = fit(f.w, f.h, self.quality, 0);
-        ((w * h) as f64 * self.quality.preset().1 * self.rate as f64).max(10_000.0) as u32
+        let frames = level_fps(w, h, self.quality.fps()) as f64 / DEFAULT_FPS as f64;
+        ((w * h) as f64 * self.quality.preset().1 * frames * self.rate as f64).max(10_000.0) as u32
     }
 
     /// The best encoder there is: the GPU's reading `gpu`'s textures, the GPU's reading memory,
@@ -349,7 +354,7 @@ impl Encoder {
             .usage_type(UsageType::CameraVideoRealTime)
             .rate_control_mode(RateControlMode::Bitrate)
             .bitrate(BitRate::from_bps(bps))
-            .max_frame_rate(FrameRate::from_hz(level_fps(w, h, fps) as f32))
+            .max_frame_rate(FrameRate::from_hz(fps as f32))
             .complexity(Complexity::Low)
             .max_slice_len(16_000)
             // OpenH264's encoder threads share one pool per process, and a pool thread can still
@@ -364,6 +369,9 @@ impl Encoder {
     /// Step the size down when this computer can't keep the frame rate at it, and back up after
     /// a stretch with clear room.
     fn pace(&mut self, f: &Frame, took: Duration) {
+        if self.quality == Quality::Gaming {
+            return;
+        }
         let p = &mut self.pace;
         p.frames += 1;
         p.busy += took;
@@ -466,7 +474,7 @@ fn fit(w: usize, h: usize, q: Quality, steps: u32) -> (usize, usize) {
         (num, den) = (MAX_SHORT, short);
     }
     for _ in 0..steps {
-        if long * num * STEP.0 < q.min_long() * den * STEP.1 {
+        if long * num * STEP.0 < MIN_LONG * den * STEP.1 {
             break;
         }
         (num, den) = (num * STEP.0, den * STEP.1);
@@ -814,7 +822,7 @@ mod tests {
 
     #[test]
     fn each_quality_decodes_at_its_size() {
-        for (q, size) in [(Quality::Balanced, (1920, 1080)), (Quality::Sharp, (2560, 1440)), (Quality::Smooth, (1280, 720))] {
+        for (q, size) in [(Quality::Balanced, (1920, 1080)), (Quality::Sharp, (2560, 1440)), (Quality::Smooth, (1280, 720)), (Quality::Gaming, (2560, 1440))] {
             let (mut enc, mut dec) = (soft(q), Decoder::new().unwrap());
             let (w, h, _) = dec.decode(&enc.encode(&frame(2560, 1440, 0), true).unwrap()).unwrap().unwrap();
             assert_eq!((w, h), size, "{q:?}");
@@ -883,21 +891,27 @@ mod tests {
     }
 
     #[test]
-    fn gaming_stays_within_the_level_and_above_720p() {
-        // Level 5.2 holds 4K at 64 fps, 1080p at 120.
-        assert_eq!(level_fps(3840, 2160, 120), 64);
-        assert_eq!(level_fps(1920, 1080, 120), 120);
+    fn native_keeps_its_size_and_sharper_frames_within_the_level() {
+        // Level 5.2 holds 4K at 64 fps, 1440p at 144, 1080p at 240.
+        assert_eq!(level_fps(3840, 2160, NATIVE_FPS), 64);
+        assert_eq!(level_fps(2560, 1440, NATIVE_FPS), 144);
+        assert_eq!(level_fps(1920, 1080, NATIVE_FPS), 240);
         assert_eq!(level_fps(1920, 1080, 30), 30);
         assert_eq!(fit(3840, 2160, Quality::Gaming, 0), (3840, 2160));
-        assert_eq!(fit(3840, 2160, Quality::Gaming, 9), (1706, 960));
-        // 8.3 ms a frame at 120 fps: 9 ms is too slow.
+        assert_eq!(fit(5120, 2880, Quality::Gaming, 0), (3840, 2160));
+        // Too slow for any frame rate and a full link: still the whole screen.
         let mut enc = soft(Quality::Gaming);
-        let f = frame(3840, 2160, 0);
+        let f = frame(1920, 1080, 0);
         enc.pace.since = Instant::now() - Duration::from_secs(2);
         for _ in 0..10 {
-            enc.pace(&f, Duration::from_millis(9));
+            enc.pace(&f, Duration::from_millis(50));
         }
-        assert_eq!(enc.cpu_steps, 1);
+        enc.set_rate(0.1);
+        assert_eq!(fit(f.w, f.h, enc.quality, enc.steps()), (1920, 1080));
+        // A frame gets more bits than Sharp gives one, whatever the frame rate.
+        let per_frame = |q: Quality| soft(q).bitrate(&f) as f64 / level_fps(f.w, f.h, q.fps()) as f64;
+        assert!(per_frame(Quality::Gaming) > per_frame(Quality::Sharp));
+        assert_eq!(per_frame(Quality::Balanced), 1920.0 * 1080.0 * 2.0 / 30.0, "the desktop presets didn't change");
     }
 
     #[test]

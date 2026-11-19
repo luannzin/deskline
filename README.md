@@ -72,14 +72,15 @@ here and press Ctrl+V on their screen, and they go over and paste where you are 
 there, and they come to your clipboard on their own, ready to paste here (past 256 MB, you're asked
 first).
 
-For games and video, pick **Gaming (120 fps)**: up to 4K at up to 120 frames a second, keeping the
-frame rate and giving up size first when the link or the computer can't keep up. **Capture mouse**
+For games and video, pick **Native (games)**: their screen at its own size (up to 4K) and its own
+frame rate (as fast as it refreshes, up to 240), with more bits per frame than Sharp text. It never
+gets smaller: when the link or the computer can't keep up, fewer frames come instead. **Capture mouse**
 hands your mouse's raw movement to their computer, the way games that hide the pointer read it;
 **Ctrl+Alt+Shift+Z** gives it back. The toolbar shows the frames a second you're getting.
 
 On Linux the system's own sharing dialog decides which screens are shared and whether the viewer
-may control. That answer isn't final: the monitor picker's **Other screens…** asks for it again,
-the person sharing has **Choose screens** on the red bar, and giving control when remote
+may control. That answer isn't final: the monitor picker's **Other screens…** asks the person
+sharing, and the dialog opens when they click **Choose screens** (also on their red bar), and giving control when remote
 interaction was left off brings the dialog back by itself.
 
 Each session gets a tab, so you can have several screens open, and several people can watch the
@@ -198,7 +199,7 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
   flight as fill one round trip; when acks hold the sender back, the encoder is asked for fewer
   bits, and for more once the link is calm.
 - `src/codec.rs`: H.264 with OpenH264 compiled in, or the GPU's encoder when there is one, sized
-  and paced by the quality setting: 30 fps for desktops, 120 for games. On Windows (Media
+  and paced by the quality setting: 30 fps for desktops, the screen's own rate for Native. On Windows (Media
   Foundation) the picture goes from capture to encoder without leaving the GPU; on Linux
   (GStreamer: NVENC, or VA-API on Intel and AMD) the GPU scales and converts it. A picture that
   goes still is encoded again a few times so text blurred by motion sharpens.
@@ -214,10 +215,10 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
 ## Known limits
 
 - Linux can't share the sign-in screen, and privacy mode is Windows-only.
-- 4K at 120 fps needs a GPU encoder on the shared computer and a fast CPU on the viewing one:
-  macOS encodes in software, Linux needs GStreamer's GPU encoders (`gstreamer1.0-plugins-bad` or
-  `gstreamer1.0-vaapi`), and every viewer decodes in software, so Gaming settles at a smaller size
-  without them.
+- Native at high frame rates needs a GPU encoder on the shared computer and a fast CPU on the
+  viewing one: macOS encodes in software, Linux needs GStreamer's GPU encoders
+  (`gstreamer1.0-plugins-bad` or `gstreamer1.0-vaapi`), and every viewer decodes in software, so
+  without them Native keeps the size and sends fewer frames.
 - Sharing sound from a Mac needs macOS 14.6+ or a loopback device such as BlackHole.
 - On a Mac the permissions are tied to the app's signature: an unsigned build asks again after
   each update.

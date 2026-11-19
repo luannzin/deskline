@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use eframe::egui::emath::GuiRounding as _;
 use eframe::egui::{
     self, Align, Color32, CursorGrab, Event as UiEvent, Id, Key, Layout, Modal, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect,
     RichText, ScrollArea, Sense, TextEdit, TextureHandle, TextureOptions, Vec2, ViewportCommand, scroll_area::ScrollSource, vec2,
@@ -121,6 +122,8 @@ struct Share {
     who: String,
     control: bool,
     asking: bool,
+    /// They asked for other screens (Linux): the system's dialog opens from a click here.
+    screens: bool,
     chat: Chat,
 }
 
@@ -300,13 +303,19 @@ impl App {
             HostEvent::RequestGone { req } => self.requests.retain(|r| r.req != req),
             HostEvent::Sharing { id, who, control } => {
                 self.shares.retain(|s| s.id != id);
-                self.shares.push(Share { id, who, control, asking: false, chat: Chat::default() });
+                self.shares.push(Share { id, who, control, asking: false, screens: false, chat: Chat::default() });
                 // Someone got in (perhaps with the password, perhaps trusted): the red bar shows.
                 self.show(ctx);
             }
             HostEvent::ControlRequest { id } => {
                 if let Some(s) = self.shares.iter_mut().find(|s| s.id == id) {
                     s.asking = true;
+                }
+                self.show(ctx);
+            }
+            HostEvent::ScreensRequest { id } => {
+                if let Some(s) = self.shares.iter_mut().find(|s| s.id == id) {
+                    s.screens = true;
                 }
                 self.show(ctx);
             }
@@ -959,6 +968,8 @@ impl App {
                 let size = tex.size_vec2();
                 let scale = (area.width() / size.x).min(area.height() / size.y);
                 let rect = Rect::from_center_size(area.center(), size * scale);
+                // On whole pixels: a picture shown 1:1 but half a pixel off is all blurred.
+                let rect = Rect::from_min_size(rect.min.round_to_pixels(ui.ctx().pixels_per_point()), rect.size());
                 ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
                 if control {
                     forward_input(ui, v, rect, response.hovered());
@@ -1123,6 +1134,32 @@ impl App {
             if let Some(yes) = answer {
                 let r = self.requests.remove(0);
                 let _ = self.host.send(HostCmd::Answer { req: r.req, yes, control: r.control && yes, trust: r.trust && yes });
+            }
+        }
+
+        // One question at a time: control first.
+        let asking = self.shares.iter().any(|s| s.asking);
+        if let Some(s) = self.shares.iter_mut().find(|s| s.screens).filter(|_| !asking) {
+            let mut answer = None;
+            Modal::new(Id::unique(("screens", s.id))).frame(prompt_frame()).show(ctx, |ui| {
+                ui.set_width(prompt_width(ctx, 360.0));
+                ui.label(strong(t("Other screens")));
+                ui.add_space(12.0);
+                ui.label(RichText::new(tf("{} asks you to choose again what you share.", &[&s.who])).color(INK));
+                ui.label(look::prose(t("Your system's sharing window opens: pick the screens they see, and whether they may control.")));
+                ui.add_space(20.0);
+                ui.horizontal(|ui| {
+                    if primary(ui, t("Choose screens")).clicked() {
+                        answer = Some(true);
+                    }
+                    if ui.button(t("Not now")).clicked() {
+                        answer = Some(false);
+                    }
+                });
+            });
+            if let Some(yes) = answer {
+                s.screens = false;
+                let _ = self.host.send(HostCmd::Screens { id: s.id, yes });
             }
         }
 
@@ -1398,7 +1435,7 @@ fn quality_name(q: Quality) -> String {
         Quality::Balanced => "Balanced",
         Quality::Sharp => "Sharp text",
         Quality::Smooth => "Slow connection",
-        Quality::Gaming => "Gaming (120 fps)",
+        Quality::Gaming => "Native (games)",
     })
 }
 

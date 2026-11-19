@@ -244,9 +244,8 @@ async fn portal_input(portal: &RemoteDesktop, s: &Session<RemoteDesktop>, captur
     match i {
         Input::Move { x, y } => {
             let Some((w, h)) = capture.size() else { return Ok(()) };
-            let (x, y) = (x.clamp(0.0, 1.0) as f64 * w, y.clamp(0.0, 1.0) as f64 * h);
             let node = capture.stream().pipe_wire_node_id();
-            portal.notify_pointer_motion_absolute(s, node, x, y, Default::default()).await?
+            portal.notify_pointer_motion_absolute(s, node, inside(x, w), inside(y, h), Default::default()).await?
         }
         Input::Button { button, down } => {
             let Some(&code) = BUTTONS.get(button as usize) else { return Ok(()) };
@@ -268,6 +267,12 @@ async fn portal_input(portal: &RemoteDesktop, s: &Session<RemoteDesktop>, captur
         Input::CtrlAltDel => {}
     }
     Ok(())
+}
+
+/// A 0..1 position across `len` as the portal takes it: it refuses the far edge itself
+/// ("Invalid position" at x == width), which a release outside the picture lands on.
+fn inside(f: f32, len: f64) -> f64 {
+    (f.clamp(0.0, 1.0) as f64 * len).min((len - 1.0).max(0.0))
 }
 
 /// The monitors a portal session shares and the PipeWire thread showing one of them.
@@ -535,6 +540,15 @@ mod tests {
         assert_eq!(keys, [(29, true), (56, true), (111, true), (111, false), (56, false), (29, false)]);
         let click = Input::Button { button: 0, down: true };
         assert_eq!(expand(&click), [click]);
+    }
+
+    #[test]
+    fn positions_stay_inside_the_stream() {
+        assert_eq!(inside(1.0, 1920.0), 1919.0);
+        assert_eq!(inside(7.0, 1920.0), 1919.0);
+        assert_eq!(inside(0.5, 1920.0), 960.0);
+        assert_eq!(inside(-1.0, 1920.0), 0.0);
+        assert_eq!(inside(1.0, 0.0), 0.0);
     }
 
     #[test]

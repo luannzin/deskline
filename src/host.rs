@@ -23,9 +23,11 @@ use crate::{audio, clip, files, net};
 /// A viewer whose link dropped gets straight back in for this long.
 const GRACE: Duration = Duration::from_secs(90);
 const MAX_SESSIONS: usize = 8;
-/// After the person here closes the system's sharing dialog, a viewer can't open it again for
-/// this long: asking again and again would be a way to nag them.
+/// After the person here says no to other screens or closes the system's sharing dialog, a
+/// viewer can't ask again for this long: asking again and again would be a way to nag them.
 const DECLINED: Duration = Duration::from_secs(30);
+/// Input refused because the system's sharing dialog left remote interaction off (Linux).
+const NO_INPUT: &str = "They didn't allow remote control in their system's sharing dialog.";
 /// A picture that stays still this long is encoded again, up to `REFINE_FRAMES` times, so text
 /// blurred by the motion before it sharpens; a re-encode under `REFINE_DONE` bytes is as sharp
 /// as it gets.
@@ -52,6 +54,8 @@ pub enum HostEvent {
     Note { id: u64, text: String },
     ShareEnded { id: u64, why: String },
     Error(String),
+    /// The viewer asks for other screens: answer with `HostCmd::Screens`. Linux only.
+    ScreensRequest { id: u64 },
 }
 
 /// The window to the host side.
@@ -68,6 +72,8 @@ pub enum HostCmd {
     Untrust(String),
     /// Choose again what to share: the system's dialog, on Linux.
     Reshare,
+    /// The answer to `HostEvent::ScreensRequest`: yes opens the system's dialog.
+    Screens { id: u64, yes: bool },
 }
 
 impl HostCmd {
@@ -232,6 +238,13 @@ impl Host {
                 }
                 HostCmd::Reshare => {
                     tokio::spawn(self.clone().reshare(None));
+                }
+                HostCmd::Screens { id, yes: true } => {
+                    tokio::spawn(self.clone().reshare(Some(id)));
+                }
+                HostCmd::Screens { id, yes: false } => {
+                    *self.declined.lock().unwrap() = Some(Instant::now());
+                    self.to(id, Cmd::Tell(Tell::Note("They'd rather not change what they share now.".into())));
                 }
             }
         }
@@ -516,11 +529,11 @@ impl Host {
                         let mut s = screen.lock().await;
                         if let Err(e) = s.input(i).await
                             && !refused
-                            && s.input_allowed()
                         {
                             refused = true;
+                            let why = if s.input_allowed() { format!("Their computer refused the mouse or keyboard: {e}") } else { NO_INPUT.into() };
                             drop(s);
-                            send_msg(send, &Tell::Note(format!("Their computer refused the mouse or keyboard: {e}"))).await?;
+                            send_msg(send, &Tell::Note(why)).await?;
                         }
                     }
                     Some(Ask::Ack(n)) => {
@@ -594,12 +607,14 @@ impl Host {
                         self.refresh_fps(screen).await;
                     }
                     // Other screens, or input after all: only Linux's portals choose what's shared.
+                    // The person here is asked first: a system dialog nobody clicked for can open
+                    // behind their windows, unseen.
                     Some(Ask::Reshare) if cfg!(target_os = "linux") => {
                         let recently = self.declined.lock().unwrap().is_some_and(|t| t.elapsed() < DECLINED);
                         if recently {
-                            send_msg(send, &Tell::Note("They closed their sharing dialog a moment ago. Ask them on the phone or in chat.".into())).await?;
+                            send_msg(send, &Tell::Note("They said no a moment ago. Ask them on the phone or in chat.".into())).await?;
                         } else {
-                            tokio::spawn(self.clone().reshare(Some(id)));
+                            self.send(HostEvent::ScreensRequest { id });
                         }
                     }
                     Some(Ask::Reshare) => {
@@ -663,8 +678,9 @@ impl Host {
                         drop(s);
                         key.notify_one();
                         send_msg(send, &Tell::Monitors { list, current }).await?;
+                        refused = false;
                         if *control && !input {
-                            send_msg(send, &Tell::Note("They didn't allow remote control in their system's sharing dialog.".into())).await?;
+                            send_msg(send, &Tell::Note(NO_INPUT.into())).await?;
                             self.to(id, Cmd::Control(false));
                         }
                     }
@@ -933,6 +949,8 @@ mod tests {
         v.send(Ask::Quality(Quality::Gaming));
         v.send(Ask::Input(Input::MoveBy { dx: 3, dy: -2 }));
         v.send(Ask::Reshare);
+        next_host(&mut host, "asked for other screens", |e| matches!(e, HostEvent::ScreensRequest { id: i } if *i == id)).await;
+        cmd_tx.send(HostCmd::Screens { id, yes: true }).unwrap();
         next_view(&mut viewer, "monitors after choosing again", |e| matches!(e, ViewEvent::Monitors { .. })).await;
         assert!(INJECTED.lock().unwrap().contains(&Input::MoveBy { dx: 3, dy: -2 }));
         v.frame.lock().unwrap().take();

@@ -213,7 +213,7 @@ const LINES: &[(&str, &str)] = &[
     ("Privacy mode isn't available on macOS.", "O modo privacidade não existe no macOS."),
     ("Unexpected reply.", "Resposta inesperada."),
     // games, and choosing again what's shared
-    ("Gaming (120 fps)", "Jogos (120 fps)"),
+    ("Native (games)", "Nativa (jogos)"),
     ("Other screens…", "Outras telas…"),
     ("Asks their computer to choose again what it shares", "Pede ao computador da pessoa pra escolher de novo o que compartilha"),
     ("Asked them to choose again what they share.", "Pedimos pra pessoa escolher de novo o que compartilha."),
@@ -226,10 +226,15 @@ const LINES: &[(&str, &str)] = &[
     ("Choose screens", "Escolher telas"),
     ("Pick again what they see, and whether they may control", "Escolha de novo o que a pessoa vê e se ela pode controlar"),
     ("They're already choosing what to share.", "A pessoa já está escolhendo o que compartilhar."),
+    ("They said no a moment ago. Ask them on the phone or in chat.", "A pessoa disse não agora há pouco. Peça por telefone ou no chat."),
+    ("They'd rather not change what they share now.", "A pessoa prefere não mudar o que compartilha agora."),
+    ("Other screens", "Outras telas"),
+    ("{} asks you to choose again what you share.", "{} pede pra você escolher de novo o que compartilha."),
     (
-        "They closed their sharing dialog a moment ago. Ask them on the phone or in chat.",
-        "A pessoa fechou a janela de compartilhamento agora há pouco. Peça por telefone ou no chat.",
+        "Your system's sharing window opens: pick the screens they see, and whether they may control.",
+        "A janela de compartilhamento do sistema vai abrir: escolha as telas que a pessoa vê e se ela pode controlar.",
     ),
+    ("Not now", "Agora não"),
     ("All of their screens are already in the list.", "Todas as telas da pessoa já estão na lista."),
     (
         "They didn't allow remote control in their system's sharing dialog.",
