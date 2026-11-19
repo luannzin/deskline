@@ -2,7 +2,7 @@
 //! Intel and AMD (vah264enc, or the older vaapih264enc). The GPU also scales the captured picture
 //! and converts it to NV12; the frame's pixels go to it as they are, without a copy. Without
 //! those elements (gstreamer1.0-plugins-bad, gstreamer1.0-vaapi) OpenH264 encodes instead.
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -68,8 +68,8 @@ pub struct Encoder {
 impl Encoder {
     /// The first GPU encoder that gives Constrained Baseline H.264 at `w`x`h`, `bps` and `fps`.
     pub fn new(w: usize, h: usize, bps: u32, fps: u32) -> anyhow::Result<Self> {
-        static INIT: OnceLock<Result<(), String>> = OnceLock::new();
-        INIT.get_or_init(|| gst::init().map_err(|e| e.to_string())).clone().map_err(anyhow::Error::msg)?;
+        // Returns at once after the first time.
+        gst::init()?;
         let mut why = Vec::new();
         for k in KINDS.iter().filter(|k| gst::ElementFactory::find(k.encoder).is_some()) {
             match Self::open(k, w, h, bps, fps) {
