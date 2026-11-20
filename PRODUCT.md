@@ -70,10 +70,10 @@ one. Free and open source. One file to run on Windows.
 
 ## Evidence on Hand
 
-- Release v0.2.0 and v0.2.1 on GitHub with Windows exe, Linux deb and portable binary, macOS
+- Releases on GitHub (v0.8.0 latest) with Windows exe, Linux deb and portable binary, macOS
   dmg and zip.
-- Screenshots in `docs/` show the pre-redesign interface (blue egui accents); they are not
-  current.
+- Screenshots in `docs/` are of v0.8.0's release exe on Windows (2026-11-20): two copies on one
+  machine (`--home` folders, made-up names), the viewer on one monitor showing the other.
 - No users, testimonials or usage numbers exist yet. Do not invent them.
 
 ## Product Principles

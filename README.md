@@ -19,8 +19,7 @@ nobody is in front of it, the sign-in screen, the address book, a picture that s
 bad connection. That's all in now.
 
 <p align="center">
-  <img src="docs/home.png" alt="Deskline's home: this computer's code, a field for a partner's code, and the recent connections with names" width="49%">
-  <img src="docs/prompt.png" alt="The prompt when someone connects: their name and code, Let them control, Always allow them, Accept and Decline" width="49%">
+  <img src="docs/viewer.png" alt="Deskline showing the other computer's screen: the toolbar with the link meter, the route, round trip and frame rate, Ctrl+Alt+Del, Privacy, Capture mouse, the monitor picker, quality, Sound, Actual size, Full screen, Files and Chat, and the other side's red sharing bar at the top of their screen" width="100%">
 </p>
 
 ## Install
@@ -29,7 +28,7 @@ Grab the file for your system from [Releases](https://github.com/luannzin/deskli
 
 | System | File | |
 |---|---|---|
-| Windows 10/11 | `deskline.exe` | One file. Run it as is, or click **Install Deskline on this computer** to install it for everyone with its service (see below). |
+| Windows 10/11 | `deskline.exe` | One file. Run it as is, or click **Settings → Install for all users** to install it for everyone with its service (see below). |
 | Ubuntu 24.04+ / Debian 12+ | `deskline_amd64.deb` | `sudo apt install ./deskline_amd64.deb` |
 | Linux, portable | `deskline-linux-x86_64` | No install: `chmod +x deskline-linux-x86_64` and run it. Needs PipeWire, GStreamer and a desktop session. |
 | macOS 11+ | `Deskline.dmg` | Drag Deskline into Applications. Allow it under **System Settings → Privacy & Security → Screen Recording** and **Accessibility** when it asks. |
@@ -44,16 +43,25 @@ is downloaded, and the installed Windows service updates on its own.
 ## Use it
 
 1. Both people open Deskline.
-2. The person who needs help clicks **Copy my code** and sends it.
-3. The other pastes it under **See a partner's screen** and clicks **Connect**.
-4. The first person gets the prompt above and clicks **Accept**. "Let them control" is ticked by
+2. The person who needs help clicks **Copy code** and sends it.
+3. The other pastes it under **Connect to a computer** and clicks **Connect**.
+4. The first person gets the prompt below and clicks **Accept**. "Let them control" is ticked by
    default, the way AnyDesk's accept window is; untick it for view only.
 5. While a session runs the person sharing sees a red bar with **Chat**, **Take back control** and
    **Stop sharing**.
 
+The person helping:
+
 <p align="center">
-  <img src="docs/sharing.png" alt="The red bar on the shared computer: who is connected, Chat, Take back control, Stop sharing" width="49%">
-  <img src="docs/waiting.png" alt="The viewer waiting for the other side to accept, with the option to log in with the unattended-access password instead" width="49%">
+  <img src="docs/home.png" alt="Deskline's home: your code in groups of four with Copy code, a field to paste their code under Connect to a computer, and Recent with a name for each computer" width="49%">
+  <img src="docs/waiting.png" alt="Waiting for them to accept, with the dusk dots sweeping, and their unattended-access password as the other way in" width="49%">
+</p>
+
+The person being helped:
+
+<p align="center">
+  <img src="docs/prompt.png" alt="The prompt when someone connects: their name and code, Let them control ticked, Always allow them, Accept and Decline" width="49%">
+  <img src="docs/sharing.png" alt="The red bar on the shared computer: who sees and controls the screen, Chat, Take back control, Stop sharing" width="49%">
 </p>
 
 The viewer's toolbar has everything else: **Ctrl+Alt+Del**, **Privacy** (blanks their screen and
@@ -102,7 +110,7 @@ For your own computers, or anyone who's fine with you getting in without a click
 
 ### Installed mode on Windows
 
-**Install Deskline on this computer** (one UAC prompt) copies Deskline to
+**Settings → Install for all users** (one UAC prompt) copies Deskline to
 `C:\Program Files\Deskline` and installs a Windows service. That's what makes it a real AnyDesk
 replacement for remote support:
 
@@ -125,7 +133,7 @@ On Linux and macOS, **Start Deskline when I sign in** keeps it reachable from th
 | 9-digit address | A 52-character code. Nobody types it: copy, paste, and it's saved in **Recent** under a name you choose (**Rename**). There's no central server handing out short numbers, which is the point. |
 | Accept window with permissions | Same, with **Let them control** and **Always allow them** |
 | Unattended access password | **Settings → Unattended access** |
-| "Install AnyDesk" | **Install Deskline on this computer** |
+| "Install AnyDesk" | **Settings → Install for all users** |
 | Address book | **Recent**, with names |
 | File manager / clipboard files | **Files** panel to browse, download and send into any folder; copy files on one computer and paste them on the other |
 | Privacy mode, block input | **Privacy** (Windows 10 2004+) |
