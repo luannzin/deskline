@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/luannzin/deskline/releases/latest"><b>Download</b></a> ·
+  <a href="https://deskline.luannzin.com"><b>Download</b></a> ·
   <a href="#coming-from-anydesk">Coming from AnyDesk</a> ·
   <a href="#build">Build</a>
 </p>
