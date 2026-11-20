@@ -13,7 +13,7 @@ someone's code, they accept, and you see their screen; with their OK you drive t
 keyboard, copy and paste between the two computers, move files, and hear their sound. It works on
 the same network or across the internet, and traffic is encrypted end to end either way.
 
-It started as the smallest thing that could replace AnyDesk for helping family and friends. Then
+I started it as the smallest thing that could replace AnyDesk when I help family and friends. Then
 it needed the rest of what makes AnyDesk usable day to day: getting into your own computer when
 nobody is in front of it, the sign-in screen, the address book, a picture that stays usable on a
 bad connection. That's all in now.
@@ -79,9 +79,9 @@ hands your mouse's raw movement to their computer, the way games that hide the p
 **Ctrl+Alt+Shift+Z** gives it back. The toolbar shows the frames a second you're getting.
 
 On Linux the system's own sharing dialog decides which screens are shared and whether the viewer
-may control. That answer isn't final: the monitor picker's **Other screens…** asks the person
-sharing, and the dialog opens when they click **Choose screens** (also on their red bar), and giving control when remote
-interaction was left off brings the dialog back by itself.
+may control them. That answer can change later. The monitor picker's **Other screens…** asks the
+person sharing, and the dialog opens when they click **Choose screens** (it's on their red bar too).
+Giving control when remote interaction was left off brings the dialog back by itself.
 
 Each session gets a tab, so you can have several screens open, and several people can watch the
 same screen.
@@ -222,5 +222,5 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
 - Sharing sound from a Mac needs macOS 14.6+ or a loopback device such as BlackHole.
 - On a Mac the permissions are tied to the app's signature: an unsigned build asks again after
   each update.
-- The Linux and macOS backends in this version were written without a Linux or Mac machine to try
-  them on. Expect rough edges there, and please open an issue when you hit one.
+- I wrote the Linux and macOS backends in this version without a Linux or Mac machine to try them
+  on. Expect rough edges there, and please open an issue when you hit one.
