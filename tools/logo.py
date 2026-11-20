@@ -3,7 +3,8 @@
     python tools/logo.py
 
 assets/icon.png (512), assets/icon.ico (16-256), assets/tray.png and assets/tray_alert.png
-(32, the tray picks its size), assets/banner.png (the README header).
+(32, the tray picks its size), assets/banner.png (the README header) and assets/preview.png
+(1200x630, the link preview of deskline.luannzin.com).
 
 The mark is 32x32 pixel art, like LanPet's: a monitor with a dark outline, and on its screen
 the dusk from luannzin.com's dither strip (violet, plum, ember, gold) in a 4x4 Bayer ordered
@@ -157,28 +158,45 @@ def text(img, s, x, y, scale, color):
     return x
 
 
-def banner():
-    """1600x420: a field of dots on a 4px grid, night at the top dithering down to the dusk
-    glow at the bottom right where the mark sits, the name and two lines in the pixel face."""
-    w, h, cell = 1600, 420, 4
+def field(w, h, glow, reach, cell=4):
+    """A field of dots on a grid, night at the top dithering down to the dusk glow at `glow`."""
     img = Image.new("RGBA", (w, h), NIGHT)
     px = img.load()
     ramp = [NIGHT] + DUSK
-    glow = (1300, 330)
     for y in range(0, h, cell):
         for x in range(0, w, cell):
-            near = max(0.0, 1 - ((x - glow[0]) ** 2 + ((y - glow[1]) * 1.6) ** 2) ** 0.5 / 900)
+            near = max(0.0, 1 - ((x - glow[0]) ** 2 + ((y - glow[1]) * 1.6) ** 2) ** 0.5 / reach)
             t = max(near ** 1.6, 0.08 + 0.25 * (y / h) ** 2)
             c = dither(ramp, t, x // cell, y // cell)
             if c != NIGHT:
-                for yy in range(y, y + cell - 1):  # a dot, with a 1px gap: the grid shows
-                    for xx in range(x, x + cell - 1):
+                for yy in range(y, min(h, y + cell - 1)):  # a dot, with a 1px gap: the grid shows
+                    for xx in range(x, min(w, x + cell - 1)):
                         px[xx, yy] = c
+    return img
+
+
+def banner():
+    """1600x420: the field with the glow at the bottom right, where the mark sits, the name
+    and two lines in the pixel face."""
+    img = field(1600, 420, (1300, 330), 900)
     m = scaled(mark(), 256)
     img.alpha_composite(m, (1172, 92))
     text(img, "DESKLINE", 110, 120, 14, INK)
     text(img, "REMOTE DESKTOP WITH NO SERVER TO RUN", 112, 260, 4, INK)
     text(img, "WINDOWS · MACOS · LINUX · END-TO-END ENCRYPTED", 112, 310, 3, rgb("#b2b2b2"))
+    return img
+
+
+def preview():
+    """1200x630, what chat apps show under a pasted deskline.luannzin.com link."""
+    img = field(1200, 630, (600, 700), 820)
+    img.alpha_composite(scaled(mark(), 224), ((1200 - 224) // 2, 96))
+    name = "DESKLINE"
+    w = len(name) * 6 * 10 - 10
+    text(img, name, (1200 - w) // 2, 360, 10, INK)
+    line = "REMOTE DESKTOP WITH NO SERVER TO RUN"
+    w = len(line) * 6 * 4 - 4
+    text(img, line, (1200 - w) // 2, 470, 4, INK)
     return img
 
 
@@ -192,6 +210,7 @@ def main():
     art.save(os.path.join(ROOT, "tray.png"))
     mark(alert=True).save(os.path.join(ROOT, "tray_alert.png"))
     banner().save(os.path.join(ROOT, "banner.png"))
+    preview().convert("RGB").save(os.path.join(ROOT, "preview.png"), optimize=True)
     old = os.path.join(ROOT, "banner.svg")
     if os.path.exists(old):
         os.remove(old)
