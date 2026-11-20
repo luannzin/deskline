@@ -37,7 +37,7 @@ one. Free and open source. One file to run on Windows.
 ## Operating Context
 
 - The helper and the helped person usually talk on the phone or a chat app while connecting.
-- The code (52 characters) is copied and pasted, never typed; Recent keeps a name per computer.
+- The code (52 characters) is copied and pasted; Recent keeps a name per computer.
 - The window lives in the tray while waiting; a request brings it forward.
 - Windows can be installed as a service for the sign-in screen and unattended access.
 

@@ -142,7 +142,7 @@ On Linux and macOS, **Start Deskline when I sign in** keeps it reachable from th
 
 | AnyDesk | Deskline |
 |---|---|
-| 9-digit address | A 52-character code. Nobody types it: copy, paste, and it's saved in **Recent** under a name you choose (**Rename**). There's no central server handing out short numbers, which is the point. |
+| 9-digit address | A 52-character code you copy and paste, saved in **Recent** under a name you choose (**Rename**). There's no central server handing out short numbers, which is the point. |
 | Accept window with permissions | Same, with **Let them control** and **Always allow them** |
 | Unattended access password | **Settings → Unattended access** |
 | "Install AnyDesk" | **Settings → Install for all users** |
