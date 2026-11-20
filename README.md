@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="assets/banner.png" alt="Deskline: remote desktop with no server to run" width="100%">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="assets/banner.png">
+    <img src="assets/banner.webp" alt="Deskline: remote desktop with no server to run" width="100%">
+  </picture>
 </p>
 
 <p align="center">
@@ -19,7 +22,12 @@ nobody is in front of it, the sign-in screen, the address book, a picture that s
 bad connection. That's all in now.
 
 <p align="center">
-  <img src="docs/viewer.png" alt="Deskline showing the other computer's screen: the toolbar with the link meter, the route, round trip and frame rate, Ctrl+Alt+Del, Privacy, Capture mouse, the monitor picker, quality, Sound, Actual size, Full screen, Files and Chat, and the other side's red sharing bar at the top of their screen" width="100%">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/demo.png">
+    <img src="docs/demo.webp" alt="Helping on the left, being helped on the right. The person being helped clicks Copy code, the helper pastes it and connects, the prompt comes up on the other side and they click Accept, and the helper gets their screen, with Deskline's red bar on it" width="100%">
+  </picture>
+  <br>
+  <sub>Two copies of Deskline 0.8.0 on one computer, recorded as they connected.</sub>
 </p>
 
 ## Install
@@ -28,7 +36,7 @@ Grab the file for your system from [Releases](https://github.com/luannzin/deskli
 
 | System | File | |
 |---|---|---|
-| Windows 10/11 | `deskline.exe` | One file. Run it as is, or click **Settings → Install for all users** to install it for everyone with its service (see below). |
+| Windows 10/11 | `deskline.exe` | One file. Run it as is, or install it for everyone, with its service, from **Settings → Install for all users** (see below). |
 | Ubuntu 24.04+ / Debian 12+ | `deskline_amd64.deb` | `sudo apt install ./deskline_amd64.deb` |
 | Linux, portable | `deskline-linux-x86_64` | No install: `chmod +x deskline-linux-x86_64` and run it. Needs PipeWire, GStreamer and a desktop session. |
 | macOS 11+ | `Deskline.dmg` | Drag Deskline into Applications. Allow it under **System Settings → Privacy & Security → Screen Recording** and **Accessibility** when it asks. |
@@ -50,14 +58,14 @@ is downloaded, and the installed Windows service updates on its own.
 5. While a session runs the person sharing sees a red bar with **Chat**, **Take back control** and
    **Stop sharing**.
 
-The person helping:
+What the person helping sees:
 
 <p align="center">
   <img src="docs/home.png" alt="Deskline's home: your code in groups of four with Copy code, a field to paste their code under Connect to a computer, and Recent with a name for each computer" width="49%">
   <img src="docs/waiting.png" alt="Waiting for them to accept, with the dusk dots sweeping, and their unattended-access password as the other way in" width="49%">
 </p>
 
-The person being helped:
+What the person being helped sees:
 
 <p align="center">
   <img src="docs/prompt.png" alt="The prompt when someone connects: their name and code, Let them control ticked, Always allow them, Accept and Decline" width="49%">
@@ -68,6 +76,10 @@ The viewer's toolbar has everything else: **Ctrl+Alt+Del**, **Privacy** (blanks 
 locks their own mouse and keyboard), the monitor picker, picture quality, sound, actual size, full
 screen (F11 to leave), **Files** and **Chat**. On Windows every key goes through, Win, Alt+Tab and
 Print Screen included.
+
+<p align="center">
+  <img src="docs/viewer.png" alt="Deskline showing the other computer's screen, with the toolbar above it: the link meter, the route, round trip and frame rate, Ctrl+Alt+Del, Privacy, Capture mouse, the monitor picker, quality, Sound, Actual size, Full screen, Files and Chat. Their red sharing bar sits at the top of their screen" width="100%">
+</p>
 
 **Files** browses their computer: the folders along the way open with a click, Home, Desktop,
 Documents and Downloads are one click from anywhere, and Find narrows a long folder. A double

@@ -3,8 +3,9 @@
     python tools/logo.py
 
 assets/icon.png (512), assets/icon.ico (16-256), assets/tray.png and assets/tray_alert.png
-(32, the tray picks its size), assets/banner.png (the README header) and assets/preview.png
-(1200x630, the link preview of deskline.luannzin.com).
+(32, the tray picks its size), assets/banner.webp (the README header, its pointer moving) with
+assets/banner.png (the same banner, still, for reduced motion) and assets/preview.png (1200x630,
+the link preview of deskline.luannzin.com).
 
 The mark is 32x32 pixel art, like LanPet's: a monitor with a dark outline, and on its screen
 the dusk from luannzin.com's dither strip (violet, plum, ember, gold) in a 4x4 Bayer ordered
@@ -59,8 +60,11 @@ POINTER = [
 ]
 
 
-def mark(alert=False):
-    """The 32x32 mark."""
+SCREEN = (6, 8, 25, 19)  # the dusk inside the bezel: x0, y0, x1, y1
+
+
+def mark(alert=False, pointer=(15, 9)):
+    """The 32x32 mark. `pointer` is where the pointer's tip is; the screen's edge clips it."""
     img = Image.new("RGBA", (32, 32), CLEAR)
     px = img.load()
 
@@ -89,11 +93,13 @@ def mark(alert=False):
     rect(9, 26, 22, 28, LINE)
     rect(10, 26, 21, 27, BEZEL)
     rect(10, 26, 21, 26, BEZEL_LIT)
-    # the pointer, tip on the screen's upper middle
+    # the pointer, tip on the screen's upper middle unless told otherwise
+    x0, y0, x1, y1 = SCREEN
     for dy, row in enumerate(POINTER):
         for dx, c in enumerate(row):
-            if c != ".":
-                px[15 + dx, 9 + dy] = LINE if c == "o" else INK
+            x, y = pointer[0] + dx, pointer[1] + dy
+            if c != "." and x0 <= x <= x1 and y0 <= y <= y1:
+                px[x, y] = LINE if c == "o" else INK
     if alert:
         rect(23, 0, 31, 8, LINE)
         rect(24, 1, 30, 7, ALERT)
@@ -187,6 +193,30 @@ def banner():
     return img
 
 
+# Where the pointer goes in the moving banner, and how long it rests there (ms): somebody on the
+# other end looking around the screen, then back where the still banner has it.
+TOUR = [((15, 9), 1400), ((8, 11), 700), ((11, 8), 500), ((18, 10), 800), ((15, 9), 0)]
+
+
+def banner_loop():
+    """The banner as frames with durations: the pointer moves one art pixel (8 banner pixels)
+    at a time with no easing, the way a pixel-art pointer would, and rests at each stop."""
+    base = banner()
+    frames = []
+    at = TOUR[0][0]
+    for (_, rest), (nxt, _) in zip(TOUR, TOUR[1:]):
+        frames.append((at, rest))
+        while at != nxt:
+            at = (at[0] + (nxt[0] > at[0]) - (nxt[0] < at[0]), at[1] + (nxt[1] > at[1]) - (nxt[1] < at[1]))
+            frames.append((at, 70))
+    out = []
+    for p, ms in frames:
+        img = base.copy()
+        img.alpha_composite(scaled(mark(pointer=p), 256), (1172, 92))
+        out.append((img, ms))
+    return out
+
+
 def preview():
     """1200x630, what chat apps show under a pasted deskline.luannzin.com link."""
     img = field(1200, 630, (600, 700), 820)
@@ -210,6 +240,17 @@ def main():
     art.save(os.path.join(ROOT, "tray.png"))
     mark(alert=True).save(os.path.join(ROOT, "tray_alert.png"))
     banner().save(os.path.join(ROOT, "banner.png"))
+    # The README shows this one; banner.png stays for prefers-reduced-motion.
+    loop = banner_loop()
+    loop[0][0].save(
+        os.path.join(ROOT, "banner.webp"),
+        save_all=True,
+        append_images=[f for f, _ in loop[1:]],
+        duration=[ms for _, ms in loop],
+        loop=0,
+        lossless=True,
+        method=6,
+    )
     preview().convert("RGB").save(os.path.join(ROOT, "preview.png"), optimize=True)
     old = os.path.join(ROOT, "banner.svg")
     if os.path.exists(old):
