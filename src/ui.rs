@@ -19,6 +19,8 @@ use crate::files::Listing;
 use crate::host::{HostCmd, HostEvent};
 use crate::i18n::{t, tf};
 use crate::look::{self, GREEN, GROUND, HAIRLINE, INK, RED, SOFT, muted, primary, primary_enabled, quiet, soft, strong};
+#[cfg(target_os = "macos")]
+use crate::permissions::Access;
 use crate::proto::Ask;
 use crate::settings::{self, Peer, Store};
 use crate::tray::{Tray, TrayMsg};
@@ -80,6 +82,11 @@ pub struct App {
     note: String,
     /// When "Copy code" was last clicked: the button says "Copied" for 2 s.
     copied_at: Option<f64>,
+    /// The note is this error: it offers Report this.
+    trouble: Option<String>,
+    report: Report,
+    #[cfg(target_os = "macos")]
+    mac: Mac,
     requests: Vec<Request>,
     shares: Vec<Share>,
     views: Vec<Viewing>,
@@ -190,6 +197,25 @@ struct Viewing {
     remember: bool,
 }
 
+/// Report a problem, in Settings.
+#[derive(Default)]
+struct Report {
+    text: String,
+    /// Report this was clicked: the field takes focus and scrolls into view.
+    focus: bool,
+    copied_at: Option<f64>,
+}
+
+/// macOS: Screen Recording and Accessibility (`Access::ALL`'s order), as last read and when, and
+/// whether this run asked for each yet.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct Mac {
+    granted: [bool; 2],
+    checked: Option<f64>,
+    asked: [bool; 2],
+}
+
 #[derive(Default)]
 struct Form {
     pw: String,
@@ -243,6 +269,10 @@ impl App {
             remember: false,
             note: String::new(),
             copied_at: None,
+            trouble: None,
+            report: Report::default(),
+            #[cfg(target_os = "macos")]
+            mac: Mac::default(),
             requests: Vec::new(),
             shares: Vec::new(),
             views: Vec::new(),
@@ -343,6 +373,7 @@ impl App {
             HostEvent::Error(e) => {
                 self.form.error = t(&e);
                 self.note = t(&e);
+                self.trouble = Some(self.note.clone());
             }
         }
     }
@@ -424,6 +455,7 @@ impl App {
                     self.partner = net::code(peer);
                 }
                 self.note = t(&why);
+                self.trouble = (!why.is_empty()).then(|| self.note.clone());
             }
         }
     }
@@ -556,6 +588,8 @@ impl App {
                     self.note.clear();
                 }
             });
+            #[cfg(target_os = "macos")]
+            self.mac_access(ui);
 
             ui.add_space(40.0);
             ui.label(strong(t("Connect to a computer")));
@@ -583,12 +617,85 @@ impl App {
             }
             if !self.note.is_empty() {
                 ui.add_space(4.0);
-                ui.label(soft(&self.note));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(soft(&self.note));
+                    // An error: Settings' Report a problem, with the error already in it.
+                    if self.trouble.as_ref() == Some(&self.note) && quiet(ui, t("Report this")).clicked() {
+                        self.report.text = format!("{}\n\n", self.note);
+                        self.report.focus = true;
+                        self.tab = Tab::Settings;
+                    }
+                });
             }
             self.update_row(ui);
             self.contacts(ui);
             ui.add_space(40.0);
         });
+    }
+
+    /// macOS: Screen Recording and Accessibility as this Mac answers now, read again once a second
+    /// at most (System Settings is where the answer changes).
+    #[cfg(target_os = "macos")]
+    fn mac_check(&mut self, now: f64) {
+        if self.mac.checked.is_none_or(|at| now - at >= 1.0) {
+            self.mac.granted = Access::ALL.map(Access::granted);
+            self.mac.checked = Some(now);
+        }
+    }
+
+    /// macOS: the two things this Mac has to allow before anyone can see or use it, asked here,
+    /// where the person being helped already is, rather than while someone waits to get in. Gone
+    /// once both are allowed.
+    #[cfg(target_os = "macos")]
+    fn mac_access(&mut self, ui: &mut egui::Ui) {
+        self.mac_check(ui.input(|i| i.time));
+        if self.mac.granted.iter().all(|g| *g) {
+            return;
+        }
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        ui.add_space(24.0);
+        ui.label(strong(t("Two things to allow on this Mac")));
+        ui.label(look::prose(t("macOS asks once. Without them, whoever you let in can't see your screen or use your mouse.")));
+        ui.add_space(4.0);
+        // One ink button: the next thing to allow.
+        let next = self.mac.granted.iter().position(|g| !g);
+        for (i, a) in Access::ALL.into_iter().enumerate() {
+            let (name, why) = match a {
+                Access::Screen => (t("Screen Recording"), t("So they can see your screen")),
+                Access::Control => (t("Accessibility"), t("So they can use your mouse and keyboard")),
+            };
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(strong(name));
+                    ui.label(muted(why));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if self.mac.granted[i] {
+                        ui.label(muted(t("Allowed")));
+                        return;
+                    }
+                    let label = if self.mac.asked[i] { t("Open System Settings") } else { t("Allow") };
+                    let r = if next == Some(i) { primary(ui, label) } else { ui.button(label) };
+                    if r.clicked() {
+                        a.ask(!self.mac.asked[i]);
+                        self.mac.asked[i] = true;
+                    }
+                });
+            });
+        }
+        // Screen Recording reaches a running app only once it restarts.
+        if self.mac.asked[0] && !self.mac.granted[0] {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(soft(t("Switched Screen Recording on and it still isn't allowed? macOS shows Deskline the change once it restarts.")));
+                if quiet(ui, t("Restart Deskline")).clicked() {
+                    update::relaunch();
+                    self.quitting = true;
+                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                }
+            });
+        }
     }
 
     fn update_row(&mut self, ui: &mut egui::Ui) {
@@ -712,6 +819,10 @@ impl App {
             look::hairline(ui);
             ui.add_space(16.0);
             self.system(ui);
+            ui.add_space(24.0);
+            look::hairline(ui);
+            ui.add_space(16.0);
+            self.report(ui);
             if !self.note.is_empty() {
                 ui.add_space(8.0);
                 ui.label(soft(&self.note));
@@ -720,6 +831,61 @@ impl App {
             ui.label(muted(format!("Deskline {}", env!("CARGO_PKG_VERSION"))));
             ui.add_space(24.0);
         });
+    }
+
+    /// A problem in the person's words, with what Deskline knows about this computer, opened as an
+    /// issue on Deskline's GitHub or copied to send any other way. Never the code or who you've
+    /// reached: the line under the field says exactly what goes with it.
+    fn report(&mut self, ui: &mut egui::Ui) {
+        ui.label(strong(t("Report a problem")));
+        ui.label(look::prose(t(
+            "Say what happened. Open on GitHub starts an issue there, which needs a GitHub account. Copy puts it on your clipboard to send any other way.",
+        )));
+        ui.add_space(4.0);
+        let label = ui.label(soft(t("What happened?")));
+        let field = ui.add(TextEdit::multiline(&mut self.report.text).desired_rows(4).desired_width(f32::INFINITY)).labelled_by(label.id);
+        if std::mem::take(&mut self.report.focus) {
+            field.request_focus();
+            field.scroll_to_me(Some(Align::Center));
+        }
+        let about = self.about(ui.input(|i| i.time));
+        ui.label(muted(tf("Sent with it: {}. Never your code or the computers you've reached.", &[&about.replace('\n', ", ")])));
+        ui.add_space(4.0);
+        let story = self.report.text.trim().to_string();
+        ui.horizontal_wrapped(|ui| {
+            if primary_enabled(ui, !story.is_empty(), t("Open on GitHub")).clicked() {
+                open(std::path::Path::new(&issue_url(&story, &about)));
+                self.note = t("Opened in your browser: check it there, then click Create.");
+            }
+            let now = ui.input(|i| i.time);
+            let copied = self.report.copied_at.is_some_and(|at| now - at < 2.0);
+            if copied {
+                ui.ctx().request_repaint_after(Duration::from_millis(250));
+            }
+            let label = if copied { t("Copied") } else { t("Copy") };
+            if ui.add_enabled(!story.is_empty(), egui::Button::new(label)).clicked() {
+                ui.ctx().copy_text(format!("{story}\n\n{about}"));
+                self.report.copied_at = Some(now);
+            }
+        });
+    }
+
+    /// What a report says about this computer, in English (it's read by whoever fixes it), one
+    /// thing a line.
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+    fn about(&mut self, now: f64) -> String {
+        let mut lines = vec![format!("Deskline {}", env!("CARGO_PKG_VERSION")), system_name().to_string()];
+        if cfg!(windows) {
+            lines.push(if self.service { "Installed for all users" } else { "Portable" }.into());
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.mac_check(now);
+            for (name, g) in ["Screen Recording", "Accessibility"].into_iter().zip(self.mac.granted) {
+                lines.push(format!("{name}: {}", if g { "allowed" } else { "not allowed" }));
+            }
+        }
+        lines.join("\n")
     }
 
     /// Who gets in without a click. With the service, only an elevated window may change it.
@@ -1133,6 +1299,13 @@ impl App {
             });
             if let Some(yes) = answer {
                 let r = self.requests.remove(0);
+                // Accessibility is asked now, while they're at the Mac, rather than at the first
+                // click from the other side.
+                #[cfg(target_os = "macos")]
+                if yes && r.control && !Access::Control.granted() {
+                    Access::Control.ask(!self.mac.asked[1]);
+                    self.mac.asked[1] = true;
+                }
                 let _ = self.host.send(HostCmd::Answer { req: r.req, yes, control: r.control && yes, trust: r.trust && yes });
             }
         }
@@ -1223,6 +1396,7 @@ impl App {
                     update::Msg::Failed(e) => {
                         u.installing = false;
                         self.note = tf("Update failed: {}", &[&e]);
+                        self.trouble = Some(self.note.clone());
                     }
                 }
             }
@@ -1439,7 +1613,64 @@ fn quality_name(q: Quality) -> String {
     })
 }
 
-/// Open a file with whatever this system opens it with.
+/// The system, as a report names it: its name and version, and the processor. Asked once (on
+/// Windows and macOS that runs a program).
+fn system_name() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        #[cfg(target_os = "macos")]
+        let os = format!("macOS {}", output("sw_vers", &["-productVersion"]));
+        // The desktop and session pick the screen backend (portal, wlroots, X11).
+        #[cfg(target_os = "linux")]
+        let os = {
+            let release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+            let name = release.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).unwrap_or("Linux").trim_matches('"').to_string();
+            let var = |k| std::env::var(k).unwrap_or_default();
+            format!("{name}, {} on {}", var("XDG_CURRENT_DESKTOP"), var("XDG_SESSION_TYPE"))
+        };
+        // "Microsoft Windows [Version 10.0.22631.4317]"
+        #[cfg(windows)]
+        let os = output("cmd", &["/c", "ver"]);
+        format!("{os} ({})", std::env::consts::ARCH)
+    })
+}
+
+/// What a program prints, trimmed; empty if it can't run.
+#[cfg(not(target_os = "linux"))]
+fn output(program: &str, args: &[&str]) -> String {
+    let mut c = std::process::Command::new(program);
+    c.args(args);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000); // CREATE_NO_WINDOW: no console flashing up
+    c.output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+}
+
+/// A new issue on Deskline's GitHub with its form filled in (`.github/ISSUE_TEMPLATE/problem.yml`;
+/// the keys are its field ids). GitHub turns away addresses past about 8 KB, so a long story is
+/// cut; the details never are.
+fn issue_url(story: &str, about: &str) -> String {
+    format!("https://github.com/luannzin/deskline/issues/new?template=problem.yml&what={}&system={}", encode(story, 6000), encode(about, 1000))
+}
+
+/// Percent-encoded for an address's query, cut at whole characters to at most `max` bytes.
+fn encode(s: &str, max: usize) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        let mut buf = [0; 4];
+        let piece: String = c
+            .encode_utf8(&mut buf)
+            .bytes()
+            .map(|b| if b.is_ascii_alphanumeric() || b"-._~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+            .collect();
+        if out.len() + piece.len() > max {
+            break;
+        }
+        out.push_str(&piece);
+    }
+    out
+}
+
+/// Open a file, or a web address, with whatever this system opens it with.
 fn open(path: &std::path::Path) {
     let program = if cfg!(windows) {
         "explorer"
@@ -1948,6 +2179,14 @@ impl eframe::App for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reports_encode_and_cut_at_whole_characters() {
+        assert_eq!(encode("a b/é~", 100), "a%20b%2F%C3%A9~");
+        // é is 6 bytes encoded: it doesn't fit in the last 5, so it's left out whole
+        assert_eq!(encode("ab é", 8), "ab%20");
+        assert!(issue_url("x", "y").ends_with("template=problem.yml&what=x&system=y"));
+    }
 
     #[test]
     fn trails_open_each_folder_along_the_way() {

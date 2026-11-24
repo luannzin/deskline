@@ -39,11 +39,23 @@ Grab the file for your system from [Releases](https://github.com/luannzin/deskli
 | Windows 10/11 | `deskline.exe` | One file. Run it as is, or install it for everyone, with its service, from **Settings → Install for all users** (see below). |
 | Ubuntu 24.04+ / Debian 12+ | `deskline_amd64.deb` | `sudo apt install ./deskline_amd64.deb` |
 | Linux, portable | `deskline-linux-x86_64` | No install: `chmod +x deskline-linux-x86_64` and run it. Needs PipeWire, GStreamer and a desktop session. |
-| macOS 11+ | `Deskline.dmg` | Drag Deskline into Applications. Allow it under **System Settings → Privacy & Security → Screen Recording** and **Accessibility** when it asks. |
+| macOS 11+ | `Deskline.dmg` | Drag Deskline into Applications. Its home asks for **Screen Recording** and **Accessibility**: allow both. |
 | macOS, portable | `Deskline-macos.zip` | No install: unzip and open `Deskline.app` from anywhere. Same permissions as above. |
 
+On a Mac, one line in Terminal installs it into Applications and opens it:
+
+```bash
+curl -fsSL https://deskline.luannzin.com/install.sh | sh
+```
+
 The builds aren't signed with a paid certificate yet, so Windows SmartScreen says **More info →
-Run anyway** and macOS wants **Open Anyway** the first time.
+Run anyway** the first time. A `.dmg` from the browser gets the same on macOS: try once, then
+**System Settings → Privacy & Security → Open Anyway** and your password. The line above skips
+that, since what curl downloads isn't marked as coming from the internet.
+
+On a Mac, Deskline's home lists what's left to allow, each with an **Allow** button that asks or
+opens the right pane of System Settings, and **Restart Deskline** when Screen Recording needs it to
+take effect. Accessibility is also asked when you accept someone with **Let them control** ticked.
 
 Deskline updates itself from Releases: the window offers **Restart to update** when a new version
 is downloaded, and the installed Windows service updates on its own.
@@ -155,7 +167,22 @@ On Linux and macOS, **Start Deskline when I sign in** keeps it reachable from th
 | `anydesk ID --with-password` | `echo pw \| deskline CODE --with-password` |
 | AnyDesk On-Premises | Run your own [iroh-relay](https://github.com/n0-computer/iroh) and set it under **Settings → Relay server** |
 
-Not there yet: session recording, Wake-on-LAN, TCP tunnels, and phone apps.
+Not there yet: session recording, Wake-on-LAN, TCP tunnels, phone apps, and an AI agent working on
+a computer once its owner clicks Accept.
+
+## When something's wrong
+
+| What you see | What to do |
+|---|---|
+| macOS says it can't check Deskline for malware, or that it's damaged | Install it with the line in Terminal (see Install), which macOS doesn't stop. Or try once, then **System Settings → Privacy & Security → Open Anyway** and your password. |
+| Windows says it protected your PC | **More info → Run anyway**. The build isn't signed with a paid certificate yet. |
+| A Mac's screen doesn't come through | On the Mac, Deskline's home lists what's left to allow. Allow **Screen Recording**, and **Restart Deskline** if it still says it isn't allowed. |
+| Clicks and keys don't reach a Mac | Allow **Accessibility**. Deskline asks for it when the Mac accepts with **Let them control** ticked, and its home has the button too. |
+| After an update, a Mac shows Deskline as allowed and nothing works | Open Deskline: after an update it clears an answer that stopped working, so its home can ask again. From 0.9.0 every release is signed the same way, so macOS keeps the answer. |
+| No sound from a Mac | Sharing a Mac's sound needs macOS 14.6 or later, or a loopback device such as BlackHole. |
+| On Linux, a screen is missing or control doesn't work | Your system's sharing dialog decides both. **Choose screens**, on the red bar, opens it again. |
+| The Windows sign-in screen can't be reached | **Settings → Install for all users**: the service starts before anyone signs in. |
+| Anything else | **Settings → Report a problem** (or **Report this** next to an error): say what happened, and Deskline adds its version and the system, never your code or who you've connected to. It opens an issue here, or copies it to send any other way. |
 
 ## Security
 
@@ -228,6 +255,8 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
 - `src/desktop/`: capture and input. Windows: DXGI duplication and `SendInput`, following the
   secure desktop when installed. Linux: the RemoteDesktop portal (GNOME, KDE), wlroots (Sway,
   Hyprland) or X11 (XFCE, Cinnamon, MATE…). macOS: CoreGraphics display streams and CGEvent.
+- `src/permissions.rs`: on a Mac, Screen Recording and Accessibility: whether they're allowed,
+  asking for them, and clearing an answer that stopped working after an update.
 - `src/service.rs`, `src/ipc.rs`: Windows installed mode and the pipe between the service and the
   window.
 - `src/ui.rs`: the egui window. `src/settings.rs`: password, trusted people, address book, log.
@@ -240,7 +269,8 @@ cargo test loopback -- --ignored --nocapture       # Windows: captures what a to
   (`gstreamer1.0-plugins-bad` or `gstreamer1.0-vaapi`), and every viewer decodes in software, so
   without them Native keeps the size and sends fewer frames.
 - Sharing sound from a Mac needs macOS 14.6+ or a loopback device such as BlackHole.
-- On a Mac the permissions are tied to the app's signature: an unsigned build asks again after
-  each update.
+- On a Mac the permissions are tied to the app's signature. Up to 0.8.0 every build was signed
+  ad hoc, so each update asked again; from 0.9.0 releases carry one self-signed certificate, so
+  the answer stays across updates.
 - I wrote the Linux and macOS backends in this version without a Linux or Mac machine to try them
   on. Expect rough edges there, and please open an issue when you hit one.

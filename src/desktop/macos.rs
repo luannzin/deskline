@@ -22,6 +22,7 @@ use objc2_io_surface::{IOSurfaceLockOptions, IOSurfaceRef};
 use tokio::sync::watch;
 
 use super::{DEFAULT_FPS, Frame, Input, Monitor};
+use crate::permissions::accessibility;
 
 // ponytail: fixed at the macOS default; the user's own setting needs AppKit.
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
@@ -397,21 +398,6 @@ fn copy(s: &IOSurfaceRef) -> Option<Frame> {
 /// Where the pointer is now: clicks land there.
 fn cursor() -> CGPoint {
     CGEvent::new(None).map_or(CGPoint::default(), |e| CGEvent::location(Some(&*e)))
-}
-
-#[link(name = "ApplicationServices", kind = "framework")]
-unsafe extern "C" {
-    static kAXTrustedCheckOptionPrompt: &'static CFString;
-    fn AXIsProcessTrustedWithOptions(options: Option<&CFDictionary>) -> u8;
-}
-
-/// Whether macOS lets Deskline post input. `prompt` shows the system's Accessibility dialog.
-fn accessibility(prompt: bool) -> bool {
-    // SAFETY: a system string constant, and a dictionary of the documented key and value types.
-    unsafe {
-        let opts = CFDictionary::from_slices(&[kAXTrustedCheckOptionPrompt], &[CFBoolean::new(prompt)]);
-        AXIsProcessTrustedWithOptions(Some(opts.as_opaque())) != 0
-    }
 }
 
 /// evdev code to Mac virtual key code (kVK_*, by position like evdev).

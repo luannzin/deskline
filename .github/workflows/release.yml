@@ -15,6 +15,18 @@ name: release
 #   APPLE_ID               the Apple ID that notarizes
 #   APPLE_TEAM_ID          its 10-character team ID
 #   APPLE_APP_PASSWORD     an app-specific password for that Apple ID (appleid.apple.com)
+#
+# Without Apple's certificate, a self-signed one keeps the Mac's permissions across updates (macOS
+# knows an ad-hoc build only by its hash, so every update looked like a new app). Gatekeeper still
+# wants Open Anyway, or the install line on deskline.luannzin.com. Made once, kept forever (a new
+# one makes every Mac ask again):
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 7300 -subj "/CN=Deskline self-signed" \
+#     -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=critical,codeSigning" \
+#     -keyout key.pem -out cert.pem
+#   openssl pkcs12 -export -inkey key.pem -in cert.pem -out self.p12 -passout pass:"$PW" \
+#     -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1   # what macOS's `security` reads
+#   MACOS_SELF_SIGN_P12       base64 -w0 self.p12
+#   MACOS_SELF_SIGN_PASSWORD  $PW
 on:
   push:
     branches: [main]
@@ -66,6 +78,7 @@ jobs:
       # only whether they're set: the secrets themselves go to the signing steps alone
       SIGN_WINDOWS: ${{ secrets.WINDOWS_CERT_PFX != '' }}
       SIGN_MACOS: ${{ secrets.APPLE_CERT_P12 != '' && secrets.APPLE_ID != '' }}
+      SELF_SIGN_MACOS: ${{ secrets.MACOS_SELF_SIGN_P12 != '' }}
     steps:
       - uses: actions/checkout@v4
       - name: Build dependencies and Rust (Linux)
@@ -122,6 +135,25 @@ jobs:
           security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/cert.p12"
           echo "SIGN_IDENTITY=Developer ID Application" >> "$GITHUB_ENV"
+      - name: macOS self-signed certificate
+        if: runner.os == 'macOS' && env.SIGN_MACOS != 'true' && env.SELF_SIGN_MACOS == 'true'
+        env:
+          CERT: ${{ secrets.MACOS_SELF_SIGN_P12 }}
+          PASS: ${{ secrets.MACOS_SELF_SIGN_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/sign.keychain-db"
+          echo "$CERT" | base64 --decode > "$RUNNER_TEMP/self.p12"
+          security create-keychain -p ci "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p ci "$kc"
+          security import "$RUNNER_TEMP/self.p12" -k "$kc" -P "$PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          # codesign wants a chain it trusts; trusting it on this runner changes nothing on a Mac
+          security find-certificate -c "Deskline self-signed" -p "$kc" > "$RUNNER_TEMP/self.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$kc" "$RUNNER_TEMP/self.pem"
+          rm "$RUNNER_TEMP/self.p12"
+          echo "SIGN_IDENTITY=Deskline self-signed" >> "$GITHUB_ENV"
       - name: macOS (universal .app in a .dmg)
         if: runner.os == 'macOS'
         run: |

@@ -15,6 +15,8 @@ mod ipc;
 mod keyhook;
 mod look;
 mod net;
+#[cfg(target_os = "macos")]
+mod permissions;
 mod proto;
 #[cfg(windows)]
 mod service;
@@ -121,6 +123,9 @@ fn window(home: PathBuf, background: bool, settings: bool, connect: Option<(Stri
     let rt = tokio::runtime::Runtime::new()?;
     let store = Store::open(&home);
     let ep = rt.block_on(net::start(&home, store.get().relay.as_deref()))?;
+    // after net::start, which makes the folder
+    #[cfg(target_os = "macos")]
+    permissions::after_update(&home);
     let _rt = rt.enter();
     let (host, events, service) = rt.block_on(link_host(&ep, &home, &store));
 

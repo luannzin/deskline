@@ -58,6 +58,38 @@ const LINES: &[(&str, &str)] = &[
     ("Deskline {} is ready.", "O Deskline {} está pronto."),
     ("Restart to update", "Reiniciar pra atualizar"),
     ("Updating…", "Atualizando…"),
+    // macOS permissions, on Home
+    ("Two things to allow on this Mac", "Duas coisas pra permitir neste Mac"),
+    (
+        "macOS asks once. Without them, whoever you let in can't see your screen or use your mouse.",
+        "O macOS pergunta uma vez só. Sem elas, quem você deixar entrar não vê sua tela nem usa seu mouse.",
+    ),
+    ("Screen Recording", "Gravação de Tela"),
+    ("So they can see your screen", "Pra pessoa ver sua tela"),
+    ("Accessibility", "Acessibilidade"),
+    ("So they can use your mouse and keyboard", "Pra pessoa usar seu mouse e teclado"),
+    ("Allowed", "Permitido"),
+    ("Open System Settings", "Abrir Ajustes do Sistema"),
+    (
+        "Switched Screen Recording on and it still isn't allowed? macOS shows Deskline the change once it restarts.",
+        "Ligou a Gravação de Tela e ainda não aparece como permitido? O macOS só mostra a mudança pro Deskline depois que ele reinicia.",
+    ),
+    ("Restart Deskline", "Reiniciar o Deskline"),
+    // Report a problem, in Settings
+    ("Report this", "Relatar isso"),
+    ("Report a problem", "Relatar um problema"),
+    (
+        "Say what happened. Open on GitHub starts an issue there, which needs a GitHub account. Copy puts it on your clipboard to send any other way.",
+        "Conte o que aconteceu. Abrir no GitHub começa uma issue lá, e pra isso precisa de uma conta no GitHub. Copiar põe tudo na área de transferência pra mandar de outro jeito.",
+    ),
+    ("What happened?", "O que aconteceu?"),
+    (
+        "Sent with it: {}. Never your code or the computers you've reached.",
+        "Vai junto: {}. Nunca o seu código nem os computadores que você acessou.",
+    ),
+    ("Open on GitHub", "Abrir no GitHub"),
+    ("Copy", "Copiar"),
+    ("Opened in your browser: check it there, then click Create.", "Abriu no seu navegador: confira lá e clique em Create."),
     ("That code doesn't look right. It's 52 letters and digits.", "Esse código não parece certo. São 52 letras e números."),
     ("That's this computer's code. Paste your partner's.", "Esse é o código deste computador. Cole o da outra pessoa."),
     ("Installing… confirm the Windows prompt.", "Instalando… confirme o aviso do Windows."),

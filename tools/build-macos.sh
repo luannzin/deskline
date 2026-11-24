@@ -2,8 +2,10 @@
 # Builds dist/Deskline.app (universal: Apple Silicon + Intel) and dist/Deskline.dmg, the disk image
 # you drag Deskline into Applications from. Run on a Mac (brew install nasm for the fast encoder).
 #   tools/build-macos.sh
-# With SIGN_IDENTITY set (e.g. "Developer ID Application: ...", in the keychain) it signs for
-# notarization; otherwise ad-hoc.
+# With SIGN_IDENTITY set to a "Developer ID Application: ..." identity in the keychain it signs for
+# notarization. Set to any other identity (the self-signed one release.yml makes) it signs with
+# that, so macOS knows each update as the same app and keeps Screen Recording and Accessibility
+# allowed. Unset, ad-hoc: those are asked again after every update.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -43,18 +45,37 @@ cat > "$app/Contents/Info.plist" <<EOF
     <key>LSUIElement</key><false/>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSLocalNetworkUsageDescription</key><string>Deskline connects directly to computers on your network when it can.</string>
+    <key>NSAudioCaptureUsageDescription</key><string>Deskline sends what this Mac plays to the people you let in.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Deskline sends this Mac's sound through a loopback device such as BlackHole when one is installed.</string>
 </dict>
 </plist>
 EOF
 
-if [ -n "${SIGN_IDENTITY:-}" ]; then
-    # hardened runtime + secure timestamp: what notarization requires
-    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$app"
+if [[ "${SIGN_IDENTITY:-}" == "Developer ID"* ]]; then
+    # hardened runtime + secure timestamp: what notarization requires. The runtime blocks sound
+    # input (a loopback device) unless the entitlement says Deskline uses it.
+    ent=$(mktemp)
+    cat > "$ent" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key><true/>
+</dict>
+</plist>
+EOF
+    codesign --force --options runtime --timestamp --entitlements "$ent" --sign "$SIGN_IDENTITY" "$app"
+elif [ -n "${SIGN_IDENTITY:-}" ]; then
+    codesign --force --deep --sign "$SIGN_IDENTITY" "$app"
 else
     # Ad-hoc signature: required for Apple Silicon. Not notarized, so a browser-downloaded copy needs
     # System Settings > Privacy & Security > Open Anyway once (or: xattr -dr com.apple.quarantine Deskline.app).
     codesign --force --deep --sign - "$app"
 fi
+# The designated requirement is what macOS remembers permissions by: it must not change between
+# releases (an ad-hoc one names this build's hash).
+codesign --verify --deep --strict "$app"
+codesign --display --requirements - "$app"
 
 stage=$(mktemp -d)
 ditto "$app" "$stage/Deskline.app"
@@ -65,7 +86,7 @@ for try in 1 2 3; do
     [ "$try" = 3 ] && exit 1
     sleep 5
 done
-if [ -n "${SIGN_IDENTITY:-}" ]; then
+if [[ "${SIGN_IDENTITY:-}" == "Developer ID"* ]]; then
     codesign --force --timestamp --sign "$SIGN_IDENTITY" dist/Deskline.dmg
 fi
 echo "Built $app and dist/Deskline.dmg"

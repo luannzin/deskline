@@ -1,0 +1,24 @@
+# Deskline's Settings → Report a problem opens this form with `what` and `system` filled in
+# (src/ui.rs `issue_url`): keep those ids.
+name: Something's wrong
+description: Deskline didn't do what it should.
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead. Any message Deskline showed, word for word.
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: This computer
+      description: Filled in when you come from Deskline's Report a problem. Otherwise, the system and the Deskline version at the bottom of Settings.
+    validations:
+      required: true
+  - type: textarea
+    id: other
+    attributes:
+      label: The other computer
+      description: Its system and Deskline version if you know them, and whether you were helping or being helped.
