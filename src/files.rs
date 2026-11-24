@@ -372,14 +372,15 @@ async fn recv_tree(recv: &mut RecvStream, items: &[Item], into: &Path, progress:
     let (mut done, mut skipped) = (0, 0);
 
     let (dir, name, folder) = (into.to_path_buf(), clean(&top.path[0]), top.size.is_none());
-    let made = {
+    // The guard is made with the .part, on the blocking thread: dropped while that thread works,
+    // this future never sees it, and the guard goes with the thread's result. The file is
+    // closed before the guard deletes it (Windows deletes an open file only once it's closed).
+    let (file, part, mut partial) = {
         let name = name.clone();
-        blocking(move || create(&dir, &name, folder, true)).await?
+        blocking(move || create(&dir, &name, folder, true).map(|(path, file)| (file, path.clone(), Partial(Some(path))))).await?
     };
-    let part = made.0.clone();
-    let mut partial = Partial(Some(part.clone()));
     let mut folders = HashMap::new();
-    match (top.size, made.1) {
+    match (top.size, file) {
         (Some(size), Some(file)) => {
             if !recv_file(recv, file, size, &name, total, &mut done, progress).await? {
                 anyhow::bail!("{name} became unreadable while it was being sent.");
