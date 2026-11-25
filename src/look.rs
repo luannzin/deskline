@@ -200,9 +200,10 @@ pub fn row<R>(ui: &mut Ui, sense: Sense, add: impl FnOnce(&mut Ui) -> R) -> (Res
 }
 
 /// A close mark drawn as two strokes (no glyph) in a 24px target: muted, ink under the pointer
-/// or with keyboard focus, which also gets a ring.
-pub fn close(ui: &mut Ui) -> Response {
+/// or with keyboard focus, which also gets a ring. `name` is what a screen reader says for it.
+pub fn close(ui: &mut Ui, name: &str) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     let lit = response.hovered() || response.has_focus();
     let color = if lit { INK } else { MUTED };
     if response.has_focus() {
@@ -222,11 +223,12 @@ pub fn beside(ui: &Ui, label: &str) -> f32 {
     (ui.available_width() - text - 2.0 * s.button_padding.x - s.item_spacing.x).max(80.0)
 }
 
-/// This computer's code, big enough to read over the phone and set as type, not boxed: three
-/// even lines (the 13 groups go 5, 5, 3), never a lone group dangling at the end.
+/// This computer's code, big enough to read over the phone and set as type, not boxed: the
+/// nine digits on one line, the long code in three even lines (the 13 groups go 5, 5, 3), never
+/// a lone group dangling at the end.
 pub fn code(ui: &mut Ui, code: &str) {
     let groups: Vec<&str> = code.split(' ').collect();
-    let text = groups.chunks(groups.len().div_ceil(3).max(1)).map(|c| c.join("  ")).collect::<Vec<_>>().join("\n");
+    let text = groups.chunks(groups.len().div_ceil(3).max(3)).map(|c| c.join("  ")).collect::<Vec<_>>().join("\n");
     // Smaller only in a window too narrow for the lines at full size; a line never wraps.
     let wide = ui.painter().layout_no_wrap(text.clone(), FontId::monospace(CODE), INK).size().x;
     let size = (CODE * ui.available_width() / wide.max(1.0)).min(CODE).floor();

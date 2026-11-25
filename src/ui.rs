@@ -3,12 +3,15 @@
 //! code, waits on a line of dusk being drawn, and works in a tab per screen. Built from
 //! luannzin.com's quiet system (look.rs), in English or Portuguese (i18n.rs).
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use eframe::egui::emath::GuiRounding as _;
 use eframe::egui::{
     self, Align, Color32, CursorGrab, Event as UiEvent, Id, Key, Layout, Modal, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect,
-    RichText, ScrollArea, Sense, TextEdit, TextureHandle, TextureOptions, Vec2, ViewportCommand, scroll_area::ScrollSource, vec2,
+    RichText, ScrollArea, Sense, TextEdit, TextureHandle, TextureOptions, UiKind, Vec2, ViewportCommand, WidgetInfo, Role,
+    scroll_area::ScrollSource, vec2,
 };
 use iroh::{Endpoint, EndpointId};
 use tokio::sync::mpsc;
@@ -26,7 +29,7 @@ use crate::settings::{self, Peer, Store};
 use crate::tray::{Tray, TrayMsg};
 use crate::update::{self, Updater};
 use crate::viewer::{self, Cmd, Options, Out, Transfer, View, ViewEvent, What};
-use crate::{autostart, net};
+use crate::{autostart, net, short};
 #[cfg(windows)]
 use crate::{keyhook, service};
 
@@ -71,7 +74,11 @@ pub struct App {
     view_events: mpsc::UnboundedReceiver<(u64, ViewEvent)>,
     /// Files and folders picked to send: the session, the path, the folder of theirs it goes to.
     picked: (mpsc::UnboundedSender<Picked>, mpsc::UnboundedReceiver<Picked>),
+    /// This computer's code, the long one: its key.
     code: String,
+    short: Short,
+    /// Their short code, being looked up.
+    lookup: Option<Lookup>,
     password_on: bool,
     trusted: Vec<Peer>,
     partner: String,
@@ -115,6 +122,22 @@ enum Tab {
     Home,
     Settings,
     View(u64),
+}
+
+/// This run's short code (short.rs): the digits Home shows, the code its record points at while
+/// the window is open, and whether the last try to publish it worked (true before any try).
+struct Short {
+    shown: String,
+    target: std::sync::mpsc::Sender<Option<EndpointId>>,
+    sent: Option<EndpointId>,
+    worked: Arc<AtomicBool>,
+}
+
+/// Their short code being looked up, and the password and tick to connect with once it's found.
+struct Lookup {
+    password: Option<String>,
+    remember: bool,
+    answer: std::sync::mpsc::Receiver<anyhow::Result<Option<EndpointId>>>,
 }
 
 struct Request {
@@ -250,9 +273,23 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
         }
+        let short = {
+            let (target, targets) = std::sync::mpsc::channel();
+            let (shown, worked) = (short::generate(), Arc::new(AtomicBool::new(true)));
+            let (digits, last, wake) = (shown.clone(), worked.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                short::publish(&digits, targets, |ok| {
+                    last.store(ok, Ordering::Relaxed);
+                    wake.request_repaint();
+                })
+            });
+            Short { shown, target, sent: None, worked }
+        };
         let mut app = Self {
             name: net::whoami(),
             code: net::code(ep.id()),
+            short,
+            lookup: None,
             ep,
             store,
             host,
@@ -461,8 +498,15 @@ impl App {
     }
 
     fn connect(&mut self, code: &str, password: Option<String>, remember: bool) {
+        if let Some(digits) = short::parse(code) {
+            let (tx, answer) = std::sync::mpsc::channel();
+            std::thread::spawn(move || tx.send(short::find(&digits)));
+            self.lookup = Some(Lookup { password, remember, answer });
+            (self.need_password, self.note) = (false, t("Looking up their code…"));
+            return;
+        }
         let Some(peer) = net::parse_code(code) else {
-            self.note = t("That code doesn't look right. It's 52 letters and digits.");
+            self.note = t("That code doesn't look right. It's 9 digits, or 52 letters and digits.");
             return;
         };
         if peer == self.ep.id() || self.code.replace(' ', "") == peer.to_z32() {
@@ -528,8 +572,9 @@ impl App {
                     if v.chat.unread > 0 {
                         label.push_str(&format!("  {}", v.chat.unread));
                     }
+                    let name = format!("{} {}", t("Disconnect"), v.who.as_deref().unwrap_or_default());
                     tab(ui, &mut self.tab, Tab::View(v.session.id), label);
-                    if look::close(ui).on_hover_text(t("Disconnect")).clicked() {
+                    if look::close(ui, name.trim_end()).on_hover_text(t("Disconnect")).clicked() {
                         close = Some(v.session.id);
                     }
                 }
@@ -565,9 +610,14 @@ impl App {
         column(ui, "home", |ui| {
             ui.add_space(40.0);
             ui.label(strong(t("Your code")));
-            ui.label(look::prose(t("Send it to whoever is helping you. It never changes.")));
+            // The nine digits unless they couldn't be published (offline, say): then the long
+            // code, which also works on the same network with no internet.
+            let short = self.short.worked.load(Ordering::Relaxed);
+            let code = if short { self.short.shown.clone() } else { self.code.clone() };
+            let why = if short { "Read it out or send it to whoever is helping you." } else { "Send it to whoever is helping you. It never changes." };
+            ui.label(look::prose(t(why)));
             ui.add_space(8.0);
-            look::code(ui, &self.code);
+            look::code(ui, &code);
             ui.add_space(8.0);
             // Wraps rather than push Change out of the window when the words run long.
             ui.horizontal_wrapped(|ui| {
@@ -577,7 +627,7 @@ impl App {
                     ui.ctx().request_repaint_after(Duration::from_millis(250));
                 }
                 if primary(ui, if copied { t("Copied") } else { t("Copy code") }).clicked() {
-                    ui.ctx().copy_text(self.code.replace(' ', ""));
+                    ui.ctx().copy_text(code.replace(' ', ""));
                     self.copied_at = Some(now);
                 }
                 ui.add_space(8.0);
@@ -592,21 +642,21 @@ impl App {
             self.mac_access(ui);
 
             ui.add_space(40.0);
-            ui.label(strong(t("Connect to a computer")));
+            let heading = ui.label(strong(t("Connect to a computer")));
             ui.add_space(4.0);
             let mut go = false;
             ui.horizontal(|ui| {
                 let ready = !self.partner.trim().is_empty();
                 let label = t("Connect");
-                let field = TextEdit::singleline(&mut self.partner).hint_text(t("Paste their code")).desired_width(look::beside(ui, &label));
-                let field = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+                let field = TextEdit::singleline(&mut self.partner).hint_text(t("Type or paste their code")).desired_width(look::beside(ui, &label));
+                let field = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER)).labelled_by(heading.id);
                 let clicked = primary_enabled(ui, ready, label).clicked();
                 go = (clicked || (field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))) && ready;
             });
             if self.need_password {
-                ui.label(soft(t("Their unattended-access password")));
+                let label = ui.label(soft(t("Their unattended-access password")));
                 let pw = TextEdit::singleline(&mut self.password).password(true);
-                let pw = ui.add(pw.desired_width(f32::INFINITY).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+                let pw = ui.add(pw.desired_width(f32::INFINITY).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER)).labelled_by(label.id);
                 go |= pw.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !self.partner.trim().is_empty();
                 ui.checkbox(&mut self.remember, t("Log in without the password next time"));
             }
@@ -730,7 +780,7 @@ impl App {
                 ui.horizontal(|ui| {
                     match self.renaming.as_mut().filter(|(id, _)| *id == c.id) {
                         Some((_, draft)) => {
-                            let r = ui.add(TextEdit::singleline(draft).desired_width(200.0));
+                            let r = ui.add(TextEdit::singleline(draft).desired_width(200.0)).accessible_name(t("Rename"));
                             r.request_focus();
                             if r.lost_focus() || quiet(ui, t("Save")).clicked() {
                                 let alias = Some(draft.trim().to_string()).filter(|a| !a.is_empty());
@@ -751,17 +801,20 @@ impl App {
                             });
                         }
                     }
+                    // Every row has the same three words; a screen reader also hears whose row.
+                    let whose = |word: String| format!("{word} {}", c.label());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if quiet(ui, t("Forget")).clicked() {
+                        if quiet(ui, t("Forget")).accessible_name(whose(t("Forget"))).clicked() {
                             let id = c.id.clone();
                             let _ = self.store.update(|s| s.contacts.retain(|x| x.id != id));
                             self.forgotten = Some((i, c.clone()));
                         }
-                        if !renaming && quiet(ui, t("Rename")).clicked() {
+                        if !renaming && quiet(ui, t("Rename")).accessible_name(whose(t("Rename"))).clicked() {
                             self.renaming = Some((c.id.clone(), c.alias.clone().unwrap_or_default()));
                         }
                         // Ink words, no frame until the pointer is on it: the row's action.
-                        if !renaming && ui.add(egui::Button::new(t("Connect")).frame_when_inactive(false)).clicked() {
+                        let connect_button = egui::Button::new(t("Connect")).frame_when_inactive(false);
+                        if !renaming && ui.add(connect_button).accessible_name(whose(t("Connect"))).clicked() {
                             connect = Some(c.id.clone());
                         }
                     });
@@ -894,6 +947,15 @@ impl App {
         ui.label(look::prose(t(
             "With a password, people who know it can connect and control this computer when nobody is here to click Accept.",
         )));
+        // Home's nine digits are new every run: unattended access needs the code that stays.
+        ui.add_space(8.0);
+        ui.label(soft(t("This computer's permanent code, for connecting with the password")));
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(&self.code).monospace().color(INK));
+            if quiet(ui, t("Copy code")).clicked() {
+                ui.ctx().copy_text(self.code.replace(' ', ""));
+            }
+        });
         ui.add_space(8.0);
         #[cfg(windows)]
         let locked = self.service && !service::is_elevated();
@@ -909,10 +971,10 @@ impl App {
             ui.label(muted(if self.password_on { t("A password is set. Set a new one to replace it.") } else { t("No password is set.") }));
             // Labels stay above the fields: a hint would vanish at the first letter.
             ui.add_space(4.0);
-            ui.label(soft(t("New password (8 characters or more)")));
-            ui.add(secret(&mut self.form.pw));
-            ui.label(soft(t("Repeat it")));
-            ui.add(secret(&mut self.form.pw2));
+            let label = ui.label(soft(t("New password (8 characters or more)")));
+            ui.add(secret(&mut self.form.pw)).labelled_by(label.id);
+            let label = ui.label(soft(t("Repeat it")));
+            ui.add(secret(&mut self.form.pw2)).labelled_by(label.id);
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 if primary(ui, t("Set password")).clicked() {
@@ -1004,14 +1066,14 @@ impl App {
             });
         }
         ui.add_space(16.0);
-        ui.label(strong(t("Relay server")));
+        let heading = ui.label(strong(t("Relay server")));
         ui.label(look::prose(t(
             "Leave empty for the public relays. Your own: run iroh-relay and paste its URL. Restart Deskline after changing.",
         )));
         ui.horizontal(|ui| {
             let label = t("Save");
             let field = TextEdit::singleline(&mut self.form.relay).hint_text("https://relay.example.com").desired_width(look::beside(ui, &label));
-            ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+            ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER)).labelled_by(heading.id);
             if ui.button(label).clicked() {
                 let relay = Some(self.form.relay.trim().to_string()).filter(|r| !r.is_empty());
                 let _ = self.store.update(|s| s.relay = relay);
@@ -1045,9 +1107,9 @@ impl App {
             if v.status == t("Waiting for them to accept…") {
                 look::hairline(ui);
                 ui.add_space(16.0);
-                ui.label(soft(t("Or log in with their unattended-access password")));
+                let label = ui.label(soft(t("Or log in with their unattended-access password")));
                 let field = TextEdit::singleline(&mut v.password).password(true).desired_width(f32::INFINITY);
-                let r = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+                let r = ui.add(field.min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER)).labelled_by(label.id);
                 ui.checkbox(&mut v.remember, t("Log in without the password next time"));
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 if (primary_enabled(ui, !v.password.is_empty(), t("Log in")).clicked() || enter) && !v.password.is_empty() {
@@ -1277,25 +1339,13 @@ impl App {
     /// The one question the person being helped has to answer, said plainly.
     fn prompts(&mut self, ctx: &egui::Context) {
         if let Some(r) = self.requests.first_mut() {
-            let mut answer = None;
-            Modal::new(Id::unique(("request", r.req))).frame(prompt_frame()).show(ctx, |ui| {
-                ui.set_width(prompt_width(ctx, 380.0));
-                ui.label(strong(t("Someone wants to see your screen")));
-                ui.add_space(12.0);
+            let id = Id::unique(("request", r.req));
+            let answer = ask(ctx, id, 380.0, t("Someone wants to see your screen"), [t("Accept"), t("Decline")], |ui| {
                 ui.label(RichText::new(&r.who).size(20.0).color(INK));
                 ui.label(look::prose(t("Only accept if you know who this is.")));
                 ui.add_space(16.0);
                 ui.checkbox(&mut r.control, t("Let them control (mouse, keyboard, clipboard, files)"));
                 ui.checkbox(&mut r.trust, t("Always allow them, even when I'm away"));
-                ui.add_space(20.0);
-                ui.horizontal(|ui| {
-                    if primary(ui, t("Accept")).clicked() {
-                        answer = Some(true);
-                    }
-                    if ui.button(t("Decline")).clicked() {
-                        answer = Some(false);
-                    }
-                });
             });
             if let Some(yes) = answer {
                 let r = self.requests.remove(0);
@@ -1313,22 +1363,9 @@ impl App {
         // One question at a time: control first.
         let asking = self.shares.iter().any(|s| s.asking);
         if let Some(s) = self.shares.iter_mut().find(|s| s.screens).filter(|_| !asking) {
-            let mut answer = None;
-            Modal::new(Id::unique(("screens", s.id))).frame(prompt_frame()).show(ctx, |ui| {
-                ui.set_width(prompt_width(ctx, 360.0));
-                ui.label(strong(t("Other screens")));
-                ui.add_space(12.0);
+            let answer = ask(ctx, Id::unique(("screens", s.id)), 360.0, t("Other screens"), [t("Choose screens"), t("Not now")], |ui| {
                 ui.label(RichText::new(tf("{} asks you to choose again what you share.", &[&s.who])).color(INK));
                 ui.label(look::prose(t("Your system's sharing window opens: pick the screens they see, and whether they may control.")));
-                ui.add_space(20.0);
-                ui.horizontal(|ui| {
-                    if primary(ui, t("Choose screens")).clicked() {
-                        answer = Some(true);
-                    }
-                    if ui.button(t("Not now")).clicked() {
-                        answer = Some(false);
-                    }
-                });
             });
             if let Some(yes) = answer {
                 s.screens = false;
@@ -1337,26 +1374,35 @@ impl App {
         }
 
         let Some(s) = self.shares.iter_mut().find(|s| s.asking) else { return };
-        let mut answer = None;
-        Modal::new(Id::unique(("control", s.id))).frame(prompt_frame()).show(ctx, |ui| {
-            ui.set_width(prompt_width(ctx, 360.0));
-            ui.label(strong(t("Control request")));
-            ui.add_space(12.0);
+        let answer = ask(ctx, Id::unique(("control", s.id)), 360.0, t("Control request"), [t("Allow"), t("Deny")], |ui| {
             ui.label(RichText::new(tf("{} wants to control your mouse and keyboard.", &[&s.who])).color(INK));
             ui.label(look::prose(t("You can take control back at any time from the red bar.")));
-            ui.add_space(20.0);
-            ui.horizontal(|ui| {
-                if primary(ui, t("Allow")).clicked() {
-                    answer = Some(true);
-                }
-                if ui.button(t("Deny")).clicked() {
-                    answer = Some(false);
-                }
-            });
         });
         if let Some(yes) = answer {
             s.asking = false;
             let _ = self.host.send(HostCmd::AllowControl { id: s.id, yes });
+        }
+    }
+
+    /// Short codes: this computer's points at its long code while the window is open (hidden in
+    /// the tray, it stops being renewed and soon finds nobody); theirs, once looked up, connects.
+    fn short_code(&mut self, ctx: &egui::Context) {
+        let target = net::parse_code(&self.code).filter(|_| !self.hidden);
+        if target != self.short.sent {
+            self.short.sent = target;
+            let _ = self.short.target.send(target);
+        }
+        let Some(lookup) = &self.lookup else { return };
+        let answer = match lookup.answer.try_recv() {
+            Ok(answer) => answer,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return ctx.request_repaint_after(Duration::from_millis(100)),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("the lookup stopped")),
+        };
+        let Lookup { password, remember, .. } = self.lookup.take().expect("checked above");
+        match answer {
+            Ok(Some(peer)) => self.connect(&net::code(peer), password, remember),
+            Ok(None) => self.note = t("No computer is showing that code. Check the digits, and that Deskline is open on their computer."),
+            Err(e) => self.note = tf("Couldn't look up that code: {}", &[&format!("{e:#}")]),
         }
     }
 
@@ -1604,6 +1650,41 @@ fn prompt_frame() -> egui::Frame {
     egui::Frame::new().fill(look::TILE).corner_radius(14).inner_margin(egui::Margin::same(24)).stroke(egui::Stroke::new(1.0, HAIRLINE))
 }
 
+/// One question for the person at this computer: `title`, what `body` adds, then the ink yes
+/// and the plain no of `[yes, no]`. The prompt is a dialog named by its title. Escape says no,
+/// and when the prompt first shows, keyboard focus (and a screen reader with it) lands on no:
+/// the window jumps forward on its own, and a key meant for another window can only turn
+/// someone away, never let them in.
+fn ask(ctx: &egui::Context, id: Id, width: f32, title: String, [yes, no]: [String; 2], body: impl FnOnce(&mut egui::Ui)) -> Option<bool> {
+    let mut answer = None;
+    Modal::new(id).frame(prompt_frame()).show(ctx, |ui| {
+        ui.set_width(prompt_width(ctx, width));
+        if let Some(dialog) = ui.stack().iter().find(|s| s.kind() == Some(UiKind::Modal)) {
+            ctx.accesskit_node_builder(dialog.unique_id, |node| node.set_label(title.clone()));
+        }
+        ui.label(strong(title));
+        ui.add_space(12.0);
+        body(ui);
+        ui.add_space(20.0);
+        ui.horizontal(|ui| {
+            if primary(ui, yes).clicked() {
+                answer = Some(true);
+            }
+            let no = ui.button(no);
+            if !ctx.memory(|m| m.areas().visible_last_frame(&ui.layer_id())) {
+                no.request_focus();
+            }
+            if no.clicked() {
+                answer = Some(false);
+            }
+        });
+        if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            answer = Some(false);
+        }
+    });
+    answer
+}
+
 fn quality_name(q: Quality) -> String {
     t(match q {
         Quality::Balanced => "Balanced",
@@ -1761,8 +1842,8 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label(soft(t("Find")));
-        ui.add(TextEdit::singleline(&mut v.find).desired_width(f32::INFINITY).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER));
+        let label = ui.label(soft(t("Find")));
+        ui.add(TextEdit::singleline(&mut v.find).desired_width(f32::INFINITY).min_size(vec2(0.0, 32.0)).align(egui::Align2::LEFT_CENTER)).labelled_by(label.id);
     });
     ui.add_space(8.0);
     look::hairline(ui);
@@ -1785,6 +1866,7 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
         for e in shown {
             let path = listing.path_of(e);
             let name = if listing.path.is_empty() { place_name(&e.name) } else { e.name.clone() };
+            let name = if e.dir { format!("{name}/") } else { name };
             let near = hot.as_deref() == Some(path.as_str());
             let mut download = false;
             // Every row takes the pointer and the keyboard: a folder opens on a click or Enter,
@@ -1801,12 +1883,13 @@ fn files_panel(ui: &mut egui::Ui, v: &mut Viewing, control: bool, picked: &mpsc:
                             ui.label(muted(size(e.size)).monospace());
                         }
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            let name = if e.dir { format!("{name}/") } else { name };
-                            ui.add(egui::Label::new(RichText::new(name).color(INK)).truncate());
+                            ui.add(egui::Label::new(RichText::new(&name).color(INK)).truncate());
                         });
                     });
                 })
             });
+            // The row is the control: a screen reader hears the name it opens or downloads.
+            row.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
             if row.contains_pointer() || row.has_focus() {
                 now_hot = Some(path.clone());
             }
@@ -2088,6 +2171,7 @@ impl eframe::App for App {
             }
         }
         self.housekeeping(ctx);
+        self.short_code(ctx);
         self.float_bar(ctx);
         if self.hidden {
             ctx.request_repaint_after(Duration::from_millis(500));

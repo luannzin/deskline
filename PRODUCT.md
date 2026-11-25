@@ -31,13 +31,17 @@ needs instructions beyond "open Deskline and send me your code".
 ## Positioning
 
 Each computer's code is its public key: connections are end-to-end encrypted QUIC dialed by
-key (iroh), with no account, no company server in the middle and no 9-digit ID handed out by
-one. Free and open source. One file to run on Windows.
+key (iroh), with no account, no company server in the middle and no ID handed out by one. To
+read over the phone, Home shows nine digits the computer picks itself each run; a key made
+from them signs a record of the real code onto iroh's public pkarr relay while the window is
+open (src/short.rs). Free and open source. One file to run on Windows.
 
 ## Operating Context
 
 - The helper and the helped person usually talk on the phone or a chat app while connecting.
-- The code (52 characters) is copied and pasted; Recent keeps a name per computer.
+- The short code (9 digits) is read out or pasted; the long code (52 characters) shows when
+  the short one can't be published (offline) and in Settings for unattended access; Recent
+  keeps a name per computer.
 - The window lives in the tray while waiting; a request brings it forward.
 - Windows can be installed as a service for the sign-in screen and unattended access.
 

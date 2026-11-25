@@ -21,6 +21,7 @@ mod proto;
 #[cfg(windows)]
 mod service;
 mod settings;
+mod short;
 mod tray;
 mod ui;
 mod update;

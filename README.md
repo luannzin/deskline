@@ -63,8 +63,9 @@ is downloaded, and the installed Windows service updates on its own.
 ## Use it
 
 1. Both people open Deskline.
-2. The person who needs help clicks **Copy code** and sends it.
-3. The other pastes it under **Connect to a computer** and clicks **Connect**.
+2. The person who needs help reads out the nine digits under **Your code**, or clicks **Copy
+   code** and sends them.
+3. The other types or pastes them under **Connect to a computer** and clicks **Connect**.
 4. The first person gets the prompt below and clicks **Accept**. "Let them control" is ticked by
    default, the way AnyDesk's accept window is; untick it for view only.
 5. While a session runs the person sharing sees a red bar with **Chat**, **Take back control** and
@@ -154,7 +155,7 @@ On Linux and macOS, **Start Deskline when I sign in** keeps it reachable from th
 
 | AnyDesk | Deskline |
 |---|---|
-| 9-digit address | A 52-character code you copy and paste, saved in **Recent** under a name you choose (**Rename**). There's no central server handing out short numbers, which is the point. |
+| 9-digit address | Nine digits too, but new each time Deskline opens and only while its window is open, saved in **Recent** under a name you choose (**Rename**) once you've connected. Nobody hands them out: each computer picks its own and signs a short record of its real code, its 52-character key, onto the same public relay iroh uses to find computers. The key itself is in **Settings → Unattended access**, for getting in with the password. |
 | Accept window with permissions | Same, with **Let them control** and **Always allow them** |
 | Unattended access password | **Settings → Unattended access** |
 | "Install AnyDesk" | **Settings → Install for all users** |
@@ -186,9 +187,12 @@ a computer once its owner clicks Accept.
 
 ## Security
 
-- The code is the computer's public key. A connection is QUIC with TLS keyed to that key, so you
-  reach the computer whose code you pasted and nobody in between can read or change the session,
-  the relays included.
+- Behind the nine digits is the computer's public key. A connection is QUIC with TLS keyed to
+  that key, so nobody in between can read or change the session, the relays included.
+- The nine digits are found through a record signed with a key made from them (Argon2), kept on
+  n0's public pkarr relay while the window is open. Whoever overhears the digits could sign one
+  too and point them at another computer, so check that the screen you get is theirs. Getting in
+  still takes their Accept.
 - Nothing about your sessions goes to a server you don't run. n0's public relays help two
   computers find each other and carry the encrypted traffic when there's no direct path.
 - A session never starts without a click on Accept, the unattended-access password, or your own
@@ -234,12 +238,16 @@ cargo test two_peers -- --ignored                  # two real endpoints: decline
                                                    # monitors, chat, revoke, stop, passwords, trust
 cargo test --release encode_speed -- --ignored --nocapture   # ms per 1080p frame
 cargo test loopback -- --ignored --nocapture       # Windows: captures what a tone plays
+cargo test short_code -- --ignored                 # puts nine digits on n0's relay, finds them
 ```
 
 ## How it works
 
 - `src/net.rs`: [iroh](https://github.com/n0-computer/iroh) QUIC dialed by public key (hole
   punching, relay fallback, mDNS on the LAN), with the identity saved on disk.
+- `src/short.rs`: the nine digits. Each run picks them; a key made from them with Argon2 signs a
+  pkarr record of the long code, renewed on n0's relay while the window is open, and the other
+  side makes the same key to fetch it.
 - `src/proto.rs`: the wire. The viewer opens a control stream, the host a video stream; sound goes
   in datagrams. Unknown messages are skipped, so versions don't have to match.
 - `src/host.rs`, `src/viewer.rs`: both ends of a session. Frames are acked and as many may be in

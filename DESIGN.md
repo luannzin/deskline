@@ -222,7 +222,7 @@ A strictly neutral near-black palette with three meanings drawn in colour on top
 - **Title** (Inter Medium 500, 15px): section heads ("Your code", "Connect to a computer", "Recent", Settings sections), the current tab, prompt questions, the peer's name in the toolbar, the sharing bar's sentence.
 - **Body** (Inter 400, 15px): everything else, including buttons, fields, rows, egui's Small style, and the status plate over a frozen picture. Weight and ink tier set it apart, never size.
 - **Prose** (Inter 400, 15px, 22px line height): explanations that can run past one line (under "Your code", Unattended access, Relay server, the installed note, the prompts' advice), so a paragraph reads as one.
-- **Code Display** (Geist Mono 400, 24px): this computer's code on Home, big enough to read over the phone, split into three even lines (13 groups as 5, 5, 3) with two spaces between groups. In a window too narrow for the lines at 24px it steps down, whole pixels at a time, until they fit; a line never wraps.
+- **Code Display** (Geist Mono 400, 24px): this computer's code on Home, big enough to read over the phone: the nine digits on one line, or, when they couldn't be published, the long code split into three even lines (13 groups as 5, 5, 3), with two spaces between groups. In a window too narrow for the lines at 24px it steps down, whole pixels at a time, until they fit; a line never wraps.
 - **Mono** (Geist Mono 400, 14px): key fingerprints in Recent and Always allowed, the peer code on the connecting screen, the link's round trip in milliseconds (so the toolbar doesn't shift as the digits change).
 
 ### Named Rules
@@ -276,7 +276,7 @@ Keyboard focus always shows in ink. Ink buttons and the red bar's buttons get a 
 - **Session toolbar:** on the ground, 16px by 8px, a hairline under it, wrapping when narrow: the peer's name (title), the link meter, the link's kind in Muted Ink and its round trip in Muted Mono, the control state, the session tools, and Disconnect as a quiet button at the end.
 
 ### Code
-This computer's code set directly on the page, nothing around it: Geist Mono 24px in ink, three even lines, selectable. Under it the ink Copy code, the unattended-access state in Muted Ink and a quiet Change, wrapping when narrow.
+This computer's code set directly on the page, nothing around it: Geist Mono 24px in ink, the nine digits on one line (the long code, when shown instead, in three even lines), selectable. Under it the ink Copy code, the unattended-access state in Muted Ink and a quiet Change, wrapping when narrow.
 
 ### Rows
 Recent contacts, Always allowed, and file listings. Text in line with the column, 8px above and below; under the pointer (or with focus) a Tile Grey tile with 14px corners reaches 12px past the text each side. Names in ink, fingerprints and sizes in Muted Ink, the row's actions at the end.

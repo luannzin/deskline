@@ -17,10 +17,14 @@ argon2 = "0.6"
 # only; capture there is PipeWire). Linux builds need libasound2-dev.
 cpal = "0.18"
 # glow (OpenGL) instead of wgpu: smaller binary, faster build, runs on old GPUs and VMs.
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "clipboard"] }
+# accesskit: the window's text and controls reach screen readers (Narrator, VoiceOver, Orca).
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11", "clipboard"] }
 # Tray icons are pngs in assets/.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Short codes (short.rs) are random digits; their records are pkarr packets, as iroh's own.
+getrandom = "0.3"
 iroh = "1.4"
+iroh-dns = "1.4"
 iroh-mdns-address-lookup = "0.6"
 # Builds Cisco's OpenH264 from source into the binary: nothing to install next to the app.
 openh264 = "0.9"
